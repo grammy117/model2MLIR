@@ -37,6 +37,45 @@ class _LiteralRange(torch.nn.Module):
         return torch.arange(self.start, self.end, dtype=torch.int64, device=x.device)
 
 
+class _TupleResults(torch.nn.Module):
+    def forward(self, x):
+        return x + 1, x.to(torch.int64) * 2, x > 0
+
+
+def test_bundle_captures_all_flat_tensor_result_references_and_exact_dtypes(tmp_path):
+    model, values = _TupleResults().eval(), (torch.tensor([-3, 2**24 + 1, 7], dtype=torch.int32),)
+    out = tmp_path / "capture"
+    write_bundle(model, values, out, capture_regions=False, capture_trace=True)
+    expected = model(*values)
+    with np.load(out / "goldens.npz", allow_pickle=False) as references:
+        assert set(references.files) == {"out0", "out1", "out2"}
+        for i, value in enumerate(expected):
+            actual, golden = references[f"out{i}"], value.numpy()
+            assert actual.shape == golden.shape and actual.dtype == golden.dtype
+            assert actual.tobytes() == golden.tobytes()
+    receipt = capture_receipt(out)
+    assert receipt["materialized_abi"]["outputs"] == 3
+    assert receipt["artifacts"]["goldens.npz"]["sha256"] == hashlib.sha256((out / "goldens.npz").read_bytes()).hexdigest()
+    metadata = json.loads((out / "meta.json").read_text())
+    assert metadata["result_references"]["storage_dtypes"] == ["int32", "int64", "bool"]
+
+
+def test_rehashed_tuple_reference_holes_and_changed_legacy_first_are_refused(tmp_path):
+    import pytest
+    for change in ("missing", "first"):
+        out = tmp_path / change
+        write_bundle(_TupleResults().eval(), (torch.tensor([1, 2], dtype=torch.int32),), out, capture_regions=False, capture_trace=True)
+        with np.load(out / "goldens.npz", allow_pickle=False) as references:
+            arrays = {name: references[name].copy() for name in references.files}
+        if change == "missing":
+            arrays.pop("out1")
+        else:
+            arrays["out0"] += 1
+        np.savez(out / "goldens.npz", **arrays)
+        with pytest.raises(ValueError, match="result references"):
+            capture_receipt(out)
+
+
 def test_bundle_preserves_exact_integer_golden_and_receipt(tmp_path):
     ranges = (
         (2**24 + 1, 2**24 + 6),

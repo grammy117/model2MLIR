@@ -618,6 +618,12 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
                                 if capture_quantization_quality else None)
     golden = g[0] if isinstance(g, (tuple, list)) else g
     np.save(out / "golden.npy", _numpy_safe(golden))
+    from m2m.capture.result_references import write_result_references
+    result_values = tuple(g) if isinstance(g, (tuple, list)) else (g,)
+    # A flat tensor tuple has the same ordinal order as the exported results.
+    # Other Python result schemas retain their existing capture boundary.
+    write_result_references(out, [_numpy_safe(value) for value in result_values]
+                            if all(isinstance(value, torch.Tensor) for value in result_values) else [])
 
     np.savez(out / "inputs.npz",
              **{f"in{i}": _numpy_safe(x) for i, x in enumerate(inputs)})

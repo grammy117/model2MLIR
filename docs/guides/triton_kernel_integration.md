@@ -24,6 +24,11 @@ binds to a real implementation; merlin does this by looking up `prov.kernel` in 
 and linking a CPU body into the model's LLVM IR. Triton is only how the kernel is authored — capture
 needs no GPU, and the kernel is never executed during export.
 
+Flat tensor tuple model results now retain every eager reference in receipt-bound
+`goldens.npz`, while `golden.npy` keeps the first result. This lets a consumer
+verify updated state and an atomic's returned old values independently. See
+[the additive result-reference contract](../reference/result_references.md).
+
 ## End-to-end: the MLP toy example
 
 Two workloads, the same 3-layer MLP (16 → 32 → 32 → 8) with the same seed, weights and input:
