@@ -134,6 +134,12 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
 - Status, the end-to-end MLP example and the full limitations list:
   `docs/guides/triton_kernel_integration.md`.
 
+Exported `CONSTANT_TENSOR` values retain exact compiler bytes in safetensors,
+with source placeholder/target/argument/type correspondence in the optional
+`m2m.compiler-constants.v1` receipt profile. Keep evaluator extras separate;
+neither naming nor a constant record grants numeric/effect or packing authority.
+Use real placeholder names and never synthesize zero stubs for source constants.
+
 ## Layout
 ```
 m2m/

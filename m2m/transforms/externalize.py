@@ -28,6 +28,8 @@ def externalize_weights(exported: Any, module: ModuleOp, path: str) -> dict:
     sd = dict(getattr(exported, "state_dict", {}) or {})
     in2param = dict(getattr(sig, "inputs_to_parameters", {})) if sig else {}
     in2buf = dict(getattr(sig, "inputs_to_buffers", {})) if sig else {}
+    in2constant = dict(getattr(sig, "inputs_to_lifted_tensor_constants", {})) if sig else {}
+    constants = dict(getattr(exported, "constants", {}) or {})
     placeholders = [n for n in exported.graph.nodes if n.op == "placeholder"]
 
     tensors: dict[str, Any] = {}
@@ -35,9 +37,17 @@ def externalize_weights(exported: Any, module: ModuleOp, path: str) -> dict:
     for idx, ph in enumerate(placeholders):
         wname = in2param.get(ph.name) or in2buf.get(ph.name)
         kind = "param" if ph.name in in2param else ("buffer" if ph.name in in2buf else "input")
-        if wname is not None and wname in sd:
+        target = in2constant.get(ph.name)
+        source = sd
+        if target is not None:
+            kind, source = "constant", constants
+            wname = "__m2m_lifted__/" + str(target)
+            if wname in sd:
+                raise ValueError("lifted constant storage key collides with captured state")
+        source_key = target if target is not None else wname
+        if wname is not None and source_key in source:
             try:
-                t = sd[wname]
+                t = source[source_key]
                 t = t.detach() if hasattr(t, "detach") else t
                 # Quantized tensor-subclass weights (torchao AffineQuantizedTensor & friends)
                 # are NOT serialized as their dequantized fp32: torch.export unfolds them into
@@ -52,6 +62,8 @@ def externalize_weights(exported: Any, module: ModuleOp, path: str) -> dict:
                 is_subclass = type(t).__name__ not in ("Tensor", "Parameter") or hasattr(
                     t, "__tensor_flatten__")
                 if is_subclass:
+                    if kind == "constant":
+                        raise ValueError("lifted constants require concrete dense tensor bytes")
                     full_shape = list(getattr(t, "shape", []))
                     dtype_str = str(getattr(t, "dtype", torch.float32)).replace("torch.", "")
                     tensors[wname] = torch.zeros(1, dtype=getattr(t, "dtype", torch.float32))
@@ -64,9 +76,15 @@ def externalize_weights(exported: Any, module: ModuleOp, path: str) -> dict:
                 manifest[str(idx)] = {"weight": wname, "kind": kind,
                                       "dtype": str(t.dtype).replace("torch.", ""),
                                       "shape": list(t.shape)}
+                if kind == "constant":
+                    from m2m.capture.trace import _tensor_bytes_sha256
+                    manifest[str(idx)].update(name=ph.name, source_target=str(target),
+                                              sha256=_tensor_bytes_sha256(t))
             except Exception as exc:  # noqa: BLE001
                 manifest[str(idx)] = {"weight": wname, "kind": kind, "error": str(exc)[:120]}
         else:
+            if kind == "constant":
+                raise ValueError("exported lifted constant has no concrete source tensor")
             manifest[str(idx)] = {"kind": kind, "name": ph.name}
 
     # Parameter-free programs are valid bundle stages too. Persist a genuine

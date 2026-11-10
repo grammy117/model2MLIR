@@ -97,7 +97,7 @@ def _flatten_subclass(obj: Any, prefix: str, out: dict, *, word_archives=None) -
 
 
 def _lifted_constants(mdl, inputs, extra: dict, *, exported_program=None, word_archives=None) -> None:
-    """Populate c_lifted_tensor_<i> from m2m's own export (graph order matches the importer)."""
+    """Populate exact constant placeholder names from m2m's actual export."""
     try:
         from torch.export.graph_signature import InputKind
 
@@ -111,15 +111,15 @@ def _lifted_constants(mdl, inputs, extra: dict, *, exported_program=None, word_a
             ep = artifact.exported_program or artifact.original_exported_program
         consts = dict(getattr(ep, "constants", {}) or {})
         sd = dict(getattr(ep, "state_dict", {}) or {})
-        li = 0
         for spec in ep.graph_signature.input_specs:
             if spec.kind != InputKind.CONSTANT_TENSOR:
                 continue
             val = consts.get(str(spec.target), sd.get(str(spec.target)))
             if val is not None and hasattr(val, "detach"):
-                key = f"c_lifted_tensor_{li}"
+                key = getattr(spec.arg, "name", None)
+                if not isinstance(key, str) or not key:
+                    raise ValueError("lifted constant lacks its exported placeholder binding")
                 extra[key] = _numpy_safe(val, word_archives=word_archives, archive="extra.npz", key=key)
-            li += 1
     except Exception as exc:  # noqa: BLE001
         import traceback
         print(f"[warn] lifted-constant export failed: {exc}\n{traceback.format_exc()[-800:]}")
@@ -665,7 +665,7 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
     for i in range(len(man)):
         meta = man[str(i)]
         nm = meta.get("name", "") or ""
-        if meta["kind"] in ("param", "buffer") or "lifted_tensor" in nm:
+        if meta["kind"] in ("param", "buffer", "constant") or "lifted_tensor" in nm:
             continue
         order[nm] = k
         k += 1

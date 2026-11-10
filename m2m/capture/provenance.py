@@ -179,10 +179,14 @@ def capture_receipt(out: str | Path, *, source_path: str | Path | None = None) -
         pointer = meta.get("frontend_trace") or {}
         if pointer.get("path") != "frontend-trace.json" or pointer.get("sha256") != artifacts["frontend-trace.json"]["sha256"]:
             raise ValueError("bundle metadata does not bind its exact frontend trace")
+    manifest = json.loads((out / "weights.safetensors.manifest.json").read_text())
+    expected_lifted = sorted({str(entry.get("name")) for entry in manifest.values()
+        if isinstance(entry, dict) and (entry.get("kind") == "constant"
+                                      or str(entry.get("name", "")).startswith("c_lifted_tensor_"))})
     lifted = {}
     with np.load(out / "extra.npz", allow_pickle=False) as extras:
         for name in sorted(extras.files):
-            if not name.startswith("c_lifted_tensor_"):
+            if name not in expected_lifted and not name.startswith("c_lifted_tensor_"):
                 continue
             value = np.asarray(extras[name])
             lifted[name] = {
@@ -190,11 +194,6 @@ def capture_receipt(out: str | Path, *, source_path: str | Path | None = None) -
                 "dtype": str(value.dtype),
                 "sha256": hashlib.sha256(value.tobytes()).hexdigest(),
             }
-    manifest = json.loads((out / "weights.safetensors.manifest.json").read_text())
-    expected_lifted = sorted({
-        str(entry.get("name")) for entry in manifest.values()
-        if isinstance(entry, dict) and str(entry.get("name", "")).startswith("c_lifted_tensor_")
-    })
     if expected_lifted != sorted(lifted):
         raise ValueError(
             "lifted-constant ABI is incomplete: "
@@ -222,6 +221,8 @@ def capture_receipt(out: str | Path, *, source_path: str | Path | None = None) -
     references = checked_result_references(out)
     from m2m.capture.tensor_words import checked_tensor_words
     checked_tensor_words(out)
+    from m2m.capture.compiler_constants import checked_compiler_constants
+    compiler_constants = checked_compiler_constants(out, manifest, lifted)
     return {
         "schema": "m2m.capture-receipt.v1",
         "tool": _tool_identity(),
@@ -233,6 +234,7 @@ def capture_receipt(out: str | Path, *, source_path: str | Path | None = None) -
                              **({"outputs": len(references["keys"])} if references is not None else {}),
                              "lifted_constants": expected_lifted},
         "lifted_constants": lifted,
+        **({"compiler_constants": compiler_constants} if compiler_constants is not None else {}),
     }
 
 

@@ -31,6 +31,9 @@ verify updated state and an atomic's returned old values independently. See
 BF16 captures additionally preserve [exact tensor words](../reference/tensor_words.md)
 alongside legacy widened arrays, so a consumer can bind bit-observing kernels
 without inferring the original words from F32 values.
+Lifted literal tensors additionally use [compiler constant storage](../reference/compiler_constants.md),
+keeping original ABI positions and exact source bytes in safetensors while
+leaving evaluator copies separate.
 
 ## End-to-end: the MLP toy example
 
