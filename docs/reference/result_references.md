@@ -6,6 +6,8 @@ For a flat tuple/list of two or more tensors it additionally writes
 uses the existing `_numpy_safe` policy: representable dtypes/words stay exact;
 the existing bfloat16 storage conversion remains explicit in the source ABI
 and recorded NumPy storage dtype.
+BF16 captures additionally retain [exact tensor words](tensor_words.md) beside
+these unchanged value references, including every BF16 tuple result.
 
 `meta.json.result_references` declares
 `m2m.flat-tensor-result-references.v1`, the archive path, ordered keys, storage

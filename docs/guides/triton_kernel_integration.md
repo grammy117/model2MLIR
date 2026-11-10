@@ -28,6 +28,9 @@ Flat tensor tuple model results now retain every eager reference in receipt-boun
 `goldens.npz`, while `golden.npy` keeps the first result. This lets a consumer
 verify updated state and an atomic's returned old values independently. See
 [the additive result-reference contract](../reference/result_references.md).
+BF16 captures additionally preserve [exact tensor words](../reference/tensor_words.md)
+alongside legacy widened arrays, so a consumer can bind bit-observing kernels
+without inferring the original words from F32 values.
 
 ## End-to-end: the MLP toy example
 

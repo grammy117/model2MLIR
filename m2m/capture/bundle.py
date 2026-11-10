@@ -75,7 +75,7 @@ def capture_hf_bundle(model_dir, out, *, quant_scheme: str | None = None, seq_le
     return summary
 
 
-def _flatten_subclass(obj: Any, prefix: str, out: dict) -> None:
+def _flatten_subclass(obj: Any, prefix: str, out: dict, *, word_archives=None) -> None:
     """Recursively flatten a tensor-subclass parameter to its leaf tensors (qinner::<attr-path>)."""
     flat = getattr(obj, "__tensor_flatten__", None)
     if callable(flat):
@@ -86,15 +86,17 @@ def _flatten_subclass(obj: Any, prefix: str, out: dict) -> None:
         for nm in names:
             child = getattr(obj, nm, None)
             if child is not None:
-                _flatten_subclass(child, f"{prefix}.{nm}", out)
+                _flatten_subclass(child, f"{prefix}.{nm}", out, word_archives=word_archives)
     elif hasattr(obj, "detach"):                       # a leaf torch.Tensor
         t = obj.detach().cpu()
+        key = f"qinner::{prefix}"
+        if word_archives is not None:
+            word_archives.add("extra.npz", key, t)
         _dt = str(t.dtype)
-        arr = t.float().numpy() if ("float8" in _dt or "bfloat16" in _dt) else t.numpy()
-        out[f"qinner::{prefix}"] = arr
+        out[key] = t.float().numpy() if ("float8" in _dt or "bfloat16" in _dt) else t.numpy()
 
 
-def _lifted_constants(mdl, inputs, extra: dict, *, exported_program=None) -> None:
+def _lifted_constants(mdl, inputs, extra: dict, *, exported_program=None, word_archives=None) -> None:
     """Populate c_lifted_tensor_<i> from m2m's own export (graph order matches the importer)."""
     try:
         from torch.export.graph_signature import InputKind
@@ -115,7 +117,8 @@ def _lifted_constants(mdl, inputs, extra: dict, *, exported_program=None) -> Non
                 continue
             val = consts.get(str(spec.target), sd.get(str(spec.target)))
             if val is not None and hasattr(val, "detach"):
-                extra[f"c_lifted_tensor_{li}"] = _numpy_safe(val)
+                key = f"c_lifted_tensor_{li}"
+                extra[key] = _numpy_safe(val, word_archives=word_archives, archive="extra.npz", key=key)
             li += 1
     except Exception as exc:  # noqa: BLE001
         import traceback
@@ -423,7 +426,7 @@ def _numpy_unrepresentable() -> frozenset:
     return frozenset(out)
 
 
-def _numpy_safe(x):
+def _numpy_safe(x, *, word_archives=None, archive=None, key=None):
     """A tensor as numpy, converting ONLY the dtypes numpy cannot represent.
 
     `numpy` has no bfloat16 (nor any float8), so `.numpy()` on such a tensor raises
@@ -436,11 +439,14 @@ def _numpy_safe(x):
     different embedding row. So the conversion is keyed on the dtype actually being unrepresentable,
     and every other dtype passes through untouched.
 
-    bf16 -> f32 is lossless (bf16 is a truncated f32), so no precision is traded for the storage.
+    Finite BF16 values embed exactly in F32. Original signaling-NaN words require
+    the separately declared raw-word archive; widening may quiet their payload.
     """
     import torch
 
     t = x.detach().cpu()
+    if word_archives is not None and archive is not None:
+        word_archives.add(archive, key, t)
     if t.dtype in _numpy_unrepresentable():
         t = t.float()
     return t.numpy()
@@ -616,17 +622,21 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
             g = runtime_mdl(*inputs)
     selected_quality_outputs = (tuple(value.detach().cpu().clone() for value in _tensor_outputs(g))
                                 if capture_quantization_quality else None)
+    from m2m.capture.tensor_words import TensorWordArchives
+    words = TensorWordArchives()
     golden = g[0] if isinstance(g, (tuple, list)) else g
-    np.save(out / "golden.npy", _numpy_safe(golden))
+    np.save(out / "golden.npy", _numpy_safe(golden, word_archives=words, archive="golden.npy"))
     from m2m.capture.result_references import write_result_references
     result_values = tuple(g) if isinstance(g, (tuple, list)) else (g,)
     # A flat tensor tuple has the same ordinal order as the exported results.
     # Other Python result schemas retain their existing capture boundary.
-    write_result_references(out, [_numpy_safe(value) for value in result_values]
+    write_result_references(out, [_numpy_safe(value, word_archives=words,
+                            archive="goldens.npz" if len(result_values) > 1 else None, key=f"out{i}")
+                            for i, value in enumerate(result_values)]
                             if all(isinstance(value, torch.Tensor) for value in result_values) else [])
 
     np.savez(out / "inputs.npz",
-             **{f"in{i}": _numpy_safe(x) for i, x in enumerate(inputs)})
+             **{f"in{i}": _numpy_safe(x, word_archives=words, archive="inputs.npz", key=f"in{i}") for i, x in enumerate(inputs)})
     if capture_trace:
         outputs = g if isinstance(g, (tuple, list)) else (g,)
         if any(not isinstance(value, torch.Tensor) for value in (*inputs, *outputs)):
@@ -639,12 +649,14 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
 
     extra: dict = {}
     for name, t in runtime_mdl.named_buffers():
-        extra["buf::" + name] = _numpy_safe(t)
+        key = "buf::" + name
+        extra[key] = _numpy_safe(t, word_archives=words, archive="extra.npz", key=key)
     for pname, p in runtime_mdl.named_parameters():
         if type(p).__name__ not in ("Parameter", "Tensor") or hasattr(p, "__tensor_flatten__"):
-            _flatten_subclass(p, pname, extra)
+            _flatten_subclass(p, pname, extra, word_archives=words)
     _lifted_constants(runtime_mdl, inputs, extra,
-                      exported_program=r.exported_program if r.exported_program is not None else exported_program)
+                      exported_program=r.exported_program if r.exported_program is not None else exported_program,
+                      word_archives=words)
     np.savez(out / "extra.npz", **extra)
 
     man = json.loads(Path(weights_path + ".manifest.json").read_text())
@@ -658,6 +670,7 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
         order[nm] = k
         k += 1
     (out / "input_order.json").write_text(json.dumps(order, indent=2))
+    words.write(out)
 
     session_summary = {}
     if session is not None:

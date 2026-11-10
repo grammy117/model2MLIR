@@ -103,7 +103,7 @@ def capture_receipt(out: str | Path, *, source_path: str | Path | None = None) -
         "inputs.npz", "golden.npy", "extra.npz", "input_order.json",
     )
     artifacts = {name: _file_record(out / name) for name in required}
-    for name in ("frontend-trace.json", "meta.json", "quantization-manifest.json", "quantization-quality.json", "goldens.npz"):
+    for name in ("frontend-trace.json", "meta.json", "quantization-manifest.json", "quantization-quality.json", "goldens.npz", "tensor_words.npz"):
         if (out / name).is_file():
             artifacts[name] = _file_record(out / name)
     if "quantization-manifest.json" not in artifacts and (
@@ -220,6 +220,8 @@ def capture_receipt(out: str | Path, *, source_path: str | Path | None = None) -
         torchao_version = None
     from m2m.capture.result_references import checked_result_references
     references = checked_result_references(out)
+    from m2m.capture.tensor_words import checked_tensor_words
+    checked_tensor_words(out)
     return {
         "schema": "m2m.capture-receipt.v1",
         "tool": _tool_identity(),
