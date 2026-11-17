@@ -134,7 +134,7 @@ def _integer_bound(value, lower):
     return int(value)
 
 
-def emit_entry_shape_guards(exported, placeholders, block, stamp):
+def emit_entry_shape_guards(exported, placeholders, block, stamp, *, context=None):
     rows, report = [], []
     for index, node in enumerate(placeholders):
         metadata = node.meta.get("val")
@@ -205,5 +205,61 @@ def emit_entry_shape_guards(exported, placeholders, block, stamp):
     for actual, expression, metadata in observations:
         builder.metadata = metadata
         builder.check(actual, builder.expression(expression, symbols), "eq", "original input dimension relation")
+    if context is not None:
+        context.update(symbols=symbols, values={})
     return {"scope": "entry-tensor-shapes", "origin": "actual-exported-symbolic-expressions",
             "dimensions": report, "arithmetic": "checked-logical-i64-sizes-and-interval-sized-integers"}
+
+
+def emit_symbolic_size(node, context, block, stamp, *, extent=None):
+    """Keep actual nonnegative symbolic size SSA, with checked index transport.
+
+    Size queries check the source shape relationship. Arithmetic uses actual
+    imported operands; expression metadata never substitutes for that math.
+    """
+    import operator
+
+    value = node.meta.get("val")
+    if not isinstance(value, torch.SymInt) or not context.get("symbols"):
+        return None
+    temporary = type(block)()
+    builder = Builder(temporary, stamp)
+    builder.metadata = node.meta
+    result = None
+    try:
+        if extent is not None:
+            expected = builder.expression(value.node.expr, context["symbols"])
+            actual = builder.emit(IndexCastUIOp(extent, builtin.i64))
+            back = builder.emit(IndexCastUIOp(actual, builtin.IndexType()))
+            equal = builder.emit(arith.CmpiOp(extent, back, "eq"))
+            builder.emit(cf.AssertOp(equal, "symbolic size query fits logical i64 storage"))
+            integer = Integer(actual, max(0, expected.lower), min(SIZE_MAX, expected.upper))
+            builder.check(integer, expected, "eq", "symbolic size query matches actual source dimensions")
+            result = extent
+        else:
+            kinds = {operator.add: "add", operator.sub: "sub", operator.mul: "mul", operator.floordiv: "floor"}
+            if node.target not in kinds or len(node.args) != 2:
+                return None
+            operands = []
+            for argument in node.args:
+                if type(argument) is int:
+                    operands.append(builder.constant(argument))
+                else:
+                    operands.append(context["values"][argument.name])
+            integer = builder.binary(kinds[node.target], *operands)
+            if not 0 <= integer.lower <= integer.upper <= SIZE_MAX:
+                return None
+            result = builder.emit(IndexCastUIOp(integer.value, builtin.IndexType()))
+            back = builder.emit(IndexCastUIOp(result, integer.value.type))
+            equal = builder.emit(arith.CmpiOp(integer.value, back, "eq"))
+            builder.emit(cf.AssertOp(equal, "symbolic size arithmetic fits logical index storage"))
+        context["values"][node.name] = integer
+        for operation in list(temporary.ops):
+            temporary.detach_op(operation)
+            block.add_op(operation)
+        return result
+    except (KeyError, TypeError, ValueError):
+        return None
+    finally:
+        for operation in reversed(list(temporary.ops)):
+            temporary.erase_op(operation, safe_erase=False)

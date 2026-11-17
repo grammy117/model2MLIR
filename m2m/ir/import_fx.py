@@ -707,7 +707,9 @@ class FXImporter:
         for i, p in enumerate(placeholders):
             value_map[p.name] = block.args[i]
         from .shape_domains import emit_entry_shape_guards
-        shape_domain = emit_entry_shape_guards(exported_program, placeholders, block, _forward_fx_meta)
+        shape_context = {}
+        shape_domain = emit_entry_shape_guards(exported_program, placeholders, block, _forward_fx_meta,
+                                               context=shape_context)
 
         # Materialize get_attr lifted tensor constants as typed values so ops that consume
         # them resolve. We materialize by TYPE from meta (data elided, like weights) -- this
@@ -794,6 +796,15 @@ class FXImporter:
                         _forward_fx_meta(op, node.meta, "shape_extent")
                         block.add_op(op)
                     value_map[node.name] = extent.result
+                    from .shape_domains import emit_symbolic_size
+                    emit_symbolic_size(node, shape_context, block, _forward_fx_meta, extent=extent.result)
+                    self.decomposed_count += 1
+                    continue
+            if node.target in (operator.add, operator.sub, operator.mul, operator.floordiv):
+                from .shape_domains import emit_symbolic_size
+                value = emit_symbolic_size(node, shape_context, block, _forward_fx_meta)
+                if value is not None:
+                    value_map[node.name] = value
                     self.decomposed_count += 1
                     continue
             if node.target == torch.ops.aten.sym_constrain_range_for_size.default and len(node.args) == 1:

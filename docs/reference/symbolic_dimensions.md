@@ -147,3 +147,19 @@ check incompatible-broadcast aborts and include signed-i64 extreme bounds/steps.
 Those primitive tests use explicit test-driver output extents for descriptor
 allocation; they do not establish a general derived-result compiler signature.
 The enclosing-model tests independently derive their actual Merlin signatures.
+
+## Symbolic size arithmetic at kernel calls
+
+Exported `aten.sym_size.int` queries and Python add/subtract/multiply/floor-divide
+nodes now retain actual scalar SSA when their checked intervals establish a
+nonnegative logical-i64 size. Queries compare the real `tensor.dim` with the
+source expression; arithmetic consumes imported scalar operands. Unsigned
+index transport keeps executable round-trip assertions. Backed symbolic hints
+never supply a literal or a proof. Negative or unproved scalar controls remain
+outside this size profile and follow the existing explicit import refusal.
+
+`tests/test_symbolic_dimensions.py` covers all four arithmetic forms, the
+original dependent copy model and a negative-control refusal. The triton2MLIR
+derived-shape integration separately exercises shared input axes and a stepped
+slice feeding two translated kernels. Consumer signatures and allocation
+require their own independent source proof; capture alone supplies neither.

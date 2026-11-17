@@ -114,3 +114,59 @@ def test_literal_symints_remain_concrete_without_new_guards(number):
     assert importer_dimension(value) == decomposition_dimension(value) == number
     assert _static_shape([value]) == [number]
     assert environment.guards == []
+
+
+@torch.library.custom_op("m2m_symbolic_test::control", mutates_args=())
+def control_kernel(x: torch.Tensor, n: int) -> torch.Tensor:
+    return x + n
+
+
+@control_kernel.register_fake
+def fake_control(x, n):
+    return torch.empty_like(x)
+
+
+@pytest.mark.parametrize("kind,opcode", [("add", "arith.addi"), ("sub", "arith.subi"),
+                                       ("mul", "arith.muli"), ("floor", "arith.floordivsi")])
+def test_exported_symbolic_arithmetic_keeps_actual_scalar_ssa_and_checked_transport(monkeypatch, kind, opcode):
+    import operator
+    from xdsl.dialects.cf import AssertOp
+    from m2m.capture.torch_mlir_bridge import _parse_mlir_text_to_xdsl
+    from m2m.coverage import opaque_report
+    from m2m.ir.standard_arith import IndexCastUIOp
+
+    arithmetic = {"add": operator.add, "sub": operator.sub, "mul": operator.mul, "floor": operator.floordiv}[kind]
+
+    class Controlled(torch.nn.Module):
+        def forward(self, x):
+            return control_kernel(x, arithmetic(x.shape[0], 2))
+
+    inputs = (torch.arange(13, dtype=torch.int32),)
+    program = torch.export.export(Controlled(), inputs,
+        dynamic_shapes={"x": {0: torch.export.Dim("n", min=4, max=31)}})
+    monkeypatch.setitem(KERNEL_REGISTRY, "m2m_symbolic_test::control", KernelSpec("m2m_symbolic_test::control"))
+    shape = next(node for node in program.graph.nodes if node.op == "placeholder").meta["val"].shape[0]
+    guards = list(shape.node.shape_env.guards)
+    result = m2m.convert(program, inputs, backend="fx_importer", capture_trace=True)
+    assert result.ok, result.diagnostics
+    result.module.verify()
+    assert opaque_report(result.mlir_text) == {} and shape.node.shape_env.guards == guards
+    call = next(op for op in result.module.walk() if isinstance(op, CallOp))
+    cast = call.arguments[1].owner
+    assert isinstance(cast, IndexCastUIOp) and cast.operands[0].owner.name == opcode
+    assert any(isinstance(op, AssertOp) and op.msg.data == "symbolic size arithmetic fits logical index storage"
+               for op in result.module.walk())
+    _parse_mlir_text_to_xdsl(result.mlir_text).verify()
+
+
+def test_negative_symbolic_control_is_not_silently_transported_as_a_size(monkeypatch):
+    class Negative(torch.nn.Module):
+        def forward(self, x):
+            return control_kernel(x, 2 - x.shape[0])
+
+    monkeypatch.setitem(KERNEL_REGISTRY, "m2m_symbolic_test::control", KernelSpec("m2m_symbolic_test::control"))
+    inputs = (torch.arange(13, dtype=torch.int32),)
+    program = torch.export.export(Negative(), inputs,
+        dynamic_shapes={"x": {0: torch.export.Dim("n", min=4, max=31)}})
+    result = m2m.convert(program, inputs, backend="fx_importer", capture_trace=True)
+    assert not result.ok
