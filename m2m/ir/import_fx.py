@@ -706,6 +706,8 @@ class FXImporter:
         multi_results: dict[str, list[SSAValue]] = {}  # split/unbind: node -> per-output SSA
         for i, p in enumerate(placeholders):
             value_map[p.name] = block.args[i]
+        from .shape_domains import emit_entry_shape_guards
+        shape_domain = emit_entry_shape_guards(exported_program, placeholders, block, _forward_fx_meta)
 
         # Materialize get_attr lifted tensor constants as typed values so ops that consume
         # them resolve. We materialize by TYPE from meta (data elided, like weights) -- this
@@ -1224,6 +1226,9 @@ class FXImporter:
 
         region = Region([block])
         main_func = FuncOp("forward", func_type, region)
+        if shape_domain is not None:
+            import json
+            main_func.attributes["prov.shape_domain"] = StringAttr(json.dumps(shape_domain, sort_keys=True))
 
         # Externs merged from while_loop body sub-imports (renamed, collision-free).
         # Kernel declarations (main body + loop bodies) go after @forward; opaque ones before.

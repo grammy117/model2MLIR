@@ -118,6 +118,12 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   operands. Never convert a backed `SymInt` hint into a static compiler fact;
   use the shared literal-aware shape helper. Source ranges remain separate from
   dynamic consumer ABI and execution qualification; see `docs/reference/symbolic_dimensions.md`.
+- Entry shape domains expand actual exported expressions/ranges to standard
+  checked arithmetic and assertions. Keep shared/derived dimension relations,
+  unsigned index transport and nonwrapping shape arithmetic executable.
+  `prov.shape_domain` records intent only; source facts cannot come from sample
+  arrays, printed constraint strings or a provenance label. Data-dependent body
+  ranges and general dynamic consumer interfaces keep their separate obligations.
 - That is the whole contract. Where a kernel's implementation lives and what language it is in
   belong to the consumer's kernel table, not the IR.
 - The private declaration is the hook a downstream lowering (merlin) points at the real kernel;

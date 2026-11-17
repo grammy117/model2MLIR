@@ -102,6 +102,8 @@ def _parse_mlir_text_to_xdsl(mlir_text: str) -> ModuleOp | None:
     ctx = Context(allow_unregistered=True)
     ctx.load_dialect(Builtin)
     ctx.load_dialect(Arith)
+    from m2m.ir.standard_arith import register_unsigned_index_cast
+    register_unsigned_index_cast(ctx)
     ctx.load_dialect(Func)
     ctx.load_dialect(Linalg)
     ctx.load_dialect(Math)

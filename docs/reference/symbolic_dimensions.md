@@ -45,8 +45,8 @@ Dependent tensor SSA and complete tuple order remain unchanged. No sample
 array, provenance label or kernel identity supplies a dimension constant.
 
 The existing frontend trace retains original symbolic shapes and
-`range_constraints`. These are captured source observations, not an executable
-shape guard or permission to invoke outside the exported domain. A traced
+`range_constraints`. These observations alone grant no executable shape fact.
+The entry-domain expansion below supplies real guards. A traced
 bundle's `input_abi`/`output_abi` and saved arrays still describe its concrete
 reference invocation; they do not specialize the symbolic MLIR or certify a
 general dynamic consumer ABI. Receipt schemas and artifact rosters are unchanged.
@@ -57,6 +57,41 @@ serialization, source ranges and all three saved result references. Its eager
 exported model also runs independent sizes within the declared range. This is
 frontend/capture evidence; no custom-kernel implementation or compiled dynamic
 model execution is claimed by those tests.
+
+## Executable entry domains
+
+`m2m.ir.shape_domains` reads actual symbolic expressions and ValueRanges from
+the exported program. It emits `tensor.dim`, standard `arith.index_castui`,
+integer arithmetic/comparisons and `cf.assert` before model computation.
+Unsigned casts have an independent native-width round-trip check and a signed
+i64 logical-size bound. Shape arithmetic uses interval-sized integers so an
+intermediate coefficient/product cannot silently wrap at the size width.
+Scalar cast bindings retain the native optional `nonNeg` promise; domain
+expansion does not invent that promise.
+
+Direct input dimensions establish symbolic roots. Shared symbols get actual
+dimension-equality checks. Invertible affine dimensions can establish a root
+without an observed direct axis, with divisibility checks before inversion.
+Range and final relation checks retain actual source expressions. Expressions
+over established roots include integer polynomials and positive-constant floor
+division. Ambiguous roots or unsupported expressions refuse explicitly.
+Data-dependent body ranges remain body obligations rather than guessed entry
+values. Printed constraint strings, example hints and evaluator arrays never
+produce these operations. The advisory `prov.shape_domain` entry annotation
+records their origin; deleting it grants no permission to delete guards.
+
+The finite analysis budgets are 256 symbolic input axes, 8192 expression visits
+and 4096-bit arithmetic. Exceeding a budget refuses conversion. These are
+resource bounds, not target-specific index widths or arbitrary source coverage.
+The source index width remains undecided. Runtime failures use the existing
+native assertion mechanism; Python exception text is not reproduced.
+
+Channel sums additionally retain a dynamic reduced axis when every retained
+output axis is static and the existing dtype rules apply. Original Linalg
+reduction bodies and input-dependent loop extents remain executable. This
+supports a real `x.sum(0) + y.sum(0)` model with shared, affine and inverse-derived
+input sizes. Independent native tests in triton2MLIR execute valid sizes and
+actual invalid-domain aborts; they do not qualify a generic dynamic-result ABI.
 
 Consumers must separately check source shape-domain relations, representable
 index/scalar conversions, runtime allocation/result dimensions and their

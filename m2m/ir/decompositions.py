@@ -4948,7 +4948,7 @@ def decompose_sum_dim(operands, meta, node_name):
 
     x = operands[0]
     in_shape = _shape_of(x)
-    if in_shape is None or any(d < 0 for d in in_shape):
+    if in_shape is None:
         return _opaque_decomp("aten_sum", operands[:1], meta, "reduce", pattern_hint="reduce_sum")
     elem = _t_elem(x)
     val: Any = meta["val"]
@@ -4973,6 +4973,11 @@ def decompose_sum_dim(operands, meta, node_name):
     else:
         dims = list(dims)
     dims = [d % len(in_shape) for d in dims]
+    # Reducing a dynamic axis needs no dynamic output allocation when every
+    # retained axis is static. Keep the original reduction body and dtype;
+    # dynamic retained dimensions still need their own allocation support.
+    if any(size < 0 for axis, size in enumerate(in_shape) if axis not in dims):
+        return _opaque_decomp("aten_sum", operands[:1], meta, "reduce", pattern_hint="reduce_sum")
     rops, summ, rsh = _reduce(x, in_shape, dims, 0, add_cls, elem)
     ops += rops
     res = summ
