@@ -4,8 +4,8 @@ Reuse checked, interval-sized shape arithmetic. Bounds come from actual tensor
 dimensions and source integer literals; symbolic example hints never participate.
 """
 
-from xdsl.dialects import arith, builtin, tensor
-from xdsl.ir import Block
+from xdsl.dialects import arith, builtin, scf, tensor
+from xdsl.ir import Block, Region
 
 from .shape_domains import SIZE_MAX, Builder, Integer
 from .standard_arith import IndexCastUIOp
@@ -96,17 +96,43 @@ def extract_slice(source, result_type, arguments):
             static_offsets[dimension] = builtin.DYNAMIC_INDEX
             offsets.append(builder.emit(IndexCastUIOp(begin.value, builtin.IndexType())))
 
+    # LLVM a47bddcc verifyInBoundsSlice rejects offset == source extent,
+    # including empty slices. Keep extraction inside the nonempty branch.
+    # Dynamic zero operands also keep statically empty source axes verifiable
+    # in the unreachable extraction branch; they grant no runtime access.
+    dynamic_offsets = iter(offsets)
+    offsets = []
+    for dimension, origin in enumerate(static_offsets):
+        if origin == builtin.DYNAMIC_INDEX:
+            offsets.append(next(dynamic_offsets))
+        elif shape[dimension] == 0:
+            offsets.append(builder.emit(arith.ConstantOp.from_int_and_width(origin, builtin.IndexType())))
+            static_offsets[dimension] = builtin.DYNAMIC_INDEX
+
     result_shape = list(static_sizes)
     operation = tensor.ExtractSliceOp.build(operands=[source, offsets, sizes, []],
         result_types=[builtin.TensorType(source.type.element_type, result_shape)], properties={
             "static_offsets": builtin.DenseArrayBase.from_list(builtin.i64, static_offsets),
             "static_sizes": builtin.DenseArrayBase.from_list(builtin.i64, static_sizes),
             "static_strides": builtin.DenseArrayBase.from_list(builtin.i64, static_strides)})
+    if any(size <= 0 for size in result_shape):
+        dynamic_sizes = iter(sizes)
+        zero = builder.emit(arith.ConstantOp.from_int_and_width(0, builtin.IndexType()))
+        predicate = builder.emit(arith.ConstantOp.from_int_and_width(1, builtin.i1))
+        for size in result_shape:
+            extent = (next(dynamic_sizes) if size == builtin.DYNAMIC_INDEX else
+                      builder.emit(arith.ConstantOp.from_int_and_width(size, builtin.IndexType())))
+            positive = builder.emit(arith.CmpiOp(extent, zero, "sgt"))
+            predicate = builder.emit(arith.AndIOp(predicate, positive))
+        empty = tensor.EmptyOp(sizes, operation.result.type)
+        operation = scf.IfOp(predicate, [operation.result.type],
+            Region(Block([operation, scf.YieldOp(operation.result)])),
+            Region(Block([empty, scf.YieldOp(empty.tensor)])))
     operations = list(block.ops)
     for item in operations:
         block.detach_op(item)
     operations.append(operation)
-    result = operation.result
+    result = operation.results[0]
     if result.type != result_type:
         cast = tensor.CastOp(result, result_type)
         operations.append(cast)

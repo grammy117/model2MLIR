@@ -136,6 +136,9 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   slices reuse checked interval-sized shape arithmetic, clip actual dimensions
   and narrow only proved logical-i64 lengths before quotient/remainder.
   Keep numeric opmath, source-domain guards and unknown-bound refusals intact.
+  Empty runtime slices return an exactly shaped empty tensor through standard
+  control flow. Do not execute an extraction with a clipped boundary offset;
+  retain original coordinate operands outside the nonempty branch for checking.
 - Dynamic permutations use `ir/permutations.py` to allocate destinations from
   the actual permuted source dimensions. Keep exact storage, complete valid
   axis maps and metadata/type agreement; example hints cannot specialize an

@@ -1,5 +1,15 @@
 # Symbolic dimensions at the FX importer boundary
 
+Positive-step runtime slices keep extraction in a standard `scf.if` nonempty
+branch and return a `tensor.empty` with the same actual sizes otherwise.
+This preserves clipped empty slices at the source boundary without executing
+an out-of-bounds subview. Both branches retain exact storage and result types;
+offset/size/stride SSA stays outside the conditional for source correspondence.
+The selected LLVM `verifyInBoundsSlice` rejects static offsets equal to the
+source extent even for empty results. Unreachable extraction branches on
+statically empty axes use explicit dynamic zero offsets and remain native
+verifiable. Original clipping and size-domain checks remain executable.
+
 `aten.permute`, `aten.t` and `aten.transpose.int` now size their standard
 `linalg.transpose` destinations from the actual permuted source axes. Each
 dynamic output extent uses its corresponding `tensor.dim` operand; an example
