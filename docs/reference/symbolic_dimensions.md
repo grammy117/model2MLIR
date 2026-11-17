@@ -1,5 +1,15 @@
 # Symbolic dimensions at the FX importer boundary
 
+`aten.permute`, `aten.t` and `aten.transpose.int` now size their standard
+`linalg.transpose` destinations from the actual permuted source axes. Each
+dynamic output extent uses its corresponding `tensor.dim` operand; an example
+hint never becomes a constant. Mixed static/dynamic ranks and legal negative
+axis names retain their original element words. Incomplete/duplicate/out-of-range
+permutations and metadata that specializes an unknown source axis refuse this
+lowering. Scalar/vector `t` and static empty cases retain their source behavior.
+This recovers logical tensor dimensions without physical alias, mutation or
+consumer placement permission.
+
 Frontend correspondence now accounts for the registered `aten.sym_numel`
 decomposition into actual dimension queries and their complete product. The
 `numel_dimension_queries` relation checks the original tensor/result anchors,

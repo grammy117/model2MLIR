@@ -891,21 +891,16 @@ def decompose_transpose(
     node_name: str,
 ) -> DecompResult:
     """Decompose aten.t.default(input) -> linalg.transpose."""
-    val: Any = meta["val"]
-    result_type = TensorType(_t_elem(operands[0]), _static_shape(val.shape))
-
-    t_empty = _make_empty(result_type)
-    perm = DenseArrayBase.from_list(i64, [1, 0])
-    transpose = TransposeOp(
-        input=operands[0],
-        init=t_empty.results[0],
-        permutation=perm,
-        result=result_type,
-    )
+    from .permutations import lower
+    rank = len(operands[0].type.get_shape()) if operands and isinstance(operands[0].type, TensorType) else -1
+    dims = [1, 0] if rank == 2 else list(range(rank)) if rank in (0, 1) else None
+    lowered = lower(operands[0], dims, _static_shape(meta["val"].shape)) if dims is not None else None
+    if lowered is None:
+        return _opaque_decomp("aten_t", operands[:1], meta, "layout", pattern_hint="transpose")
+    ops, result = lowered
     rid = _next_region_id("transpose")
-    _attach_region_id(transpose, rid)
-
-    return DecompResult(ops=[t_empty, transpose], result=transpose.results[0], region_ids=[rid])
+    _attach_region_id(result.owner, rid)
+    return DecompResult(ops=ops, result=result, region_ids=[rid])
 
 
 def decompose_permute(
@@ -923,18 +918,14 @@ def decompose_permute(
         isinstance(operand_type, TensorType)
         and operand_type.element_type == meta_elem
         and dims is not None
-        and all(d >= 0 for d in result_shape)
     ):
-        elem = operand_type.element_type
-        result_type = TensorType(elem, result_shape)
-        empty = _make_empty(result_type)
-        perm = DenseArrayBase.from_list(i64, [int(d) for d in dims])
-        transpose = TransposeOp(
-            input=operands[0], init=empty.results[0], permutation=perm, result=result_type
-        )
-        rid = _next_region_id("permute")
-        _attach_region_id(transpose, rid)
-        return DecompResult(ops=[empty, transpose], result=transpose.results[0], region_ids=[rid], pattern_hint="permute")
+        from .permutations import lower
+        lowered = lower(operands[0], dims, result_shape)
+        if lowered is not None:
+            ops, result = lowered
+            rid = _next_region_id("permute")
+            _attach_region_id(result.owner, rid)
+            return DecompResult(ops=ops, result=result, region_ids=[rid], pattern_hint="permute")
 
     return _opaque_decomp("aten_permute", operands[:1], meta, "layout", pattern_hint="permute")
 
@@ -4611,21 +4602,25 @@ def decompose_transpose_int(operands, meta, node_name):
     val: Any = meta["val"]
     out_shape = _static_shape(getattr(val, "shape", []))
     meta_elem = _element_type_from_meta(meta)
-    if not isinstance(operand_type, TensorType) or operand_type.element_type != meta_elem \
-            or any(d < 0 for d in out_shape):
+    if not isinstance(operand_type, TensorType) or operand_type.element_type != meta_elem:
         return _opaque_decomp("aten_transpose", operands[:1], meta, "layout", pattern_hint="transpose")
     rank = len(operand_type.get_shape())
-    d0 = int(_fx_arg(meta, 1, 0)) % rank
-    d1 = int(_fx_arg(meta, 2, 1)) % rank
+    d0, d1 = _fx_arg(meta, 1, 0), _fx_arg(meta, 2, 1)
+    effective_rank = max(rank, 1)
+    if any(type(axis) is not int or not -effective_rank <= axis < effective_rank for axis in (d0, d1)):
+        return _opaque_decomp("aten_transpose", operands[:1], meta, "layout", pattern_hint="transpose")
+    d0, d1 = d0 % effective_rank, d1 % effective_rank
     perm = list(range(rank))
-    perm[d0], perm[d1] = perm[d1], perm[d0]
-    result_type = TensorType(meta_elem, out_shape)
-    empty = _make_empty(result_type)
-    transpose = TransposeOp(input=operands[0], init=empty.results[0],
-                            permutation=DenseArrayBase.from_list(i64, perm), result=result_type)
+    if rank:
+        perm[d0], perm[d1] = perm[d1], perm[d0]
+    from .permutations import lower
+    lowered = lower(operands[0], perm, out_shape)
+    if lowered is None:
+        return _opaque_decomp("aten_transpose", operands[:1], meta, "layout", pattern_hint="transpose")
+    ops, result = lowered
     rid = _next_region_id("transpose")
-    _attach_region_id(transpose, rid)
-    return DecompResult(ops=[empty, transpose], result=transpose.results[0],
+    _attach_region_id(result.owner, rid)
+    return DecompResult(ops=ops, result=result,
                         region_ids=[rid], pattern_hint="transpose")
 
 

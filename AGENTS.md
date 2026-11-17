@@ -136,6 +136,10 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   slices reuse checked interval-sized shape arithmetic, clip actual dimensions
   and narrow only proved logical-i64 lengths before quotient/remainder.
   Keep numeric opmath, source-domain guards and unknown-bound refusals intact.
+- Dynamic permutations use `ir/permutations.py` to allocate destinations from
+  the actual permuted source dimensions. Keep exact storage, complete valid
+  axis maps and metadata/type agreement; example hints cannot specialize an
+  unknown dimension. Logical transposes grant no public physical aliases.
 - That is the whole contract. Where a kernel's implementation lives and what language it is in
   belong to the consumer's kernel table, not the IR.
 - The private declaration is the hook a downstream lowering (merlin) points at the real kernel;
