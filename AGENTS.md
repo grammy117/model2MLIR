@@ -83,6 +83,12 @@ existing result ordinal. Missing metadata stays unobserved; explicit None is
 recorded separately. This provenance grants no numerical or operator-effect
 semantics and does not infer absent runtime outputs.
 
+`capture/shape_trace.py` proves complete `sym_numel` dimension products through
+actual tensor/result anchors and exported shape identities. Preserve static
+factors and repeated-symbol multiplicity after CSE; do not use sample hints or
+origin tags to account for unknown dimension reads. The corresponding shape
+domain assertions must remain executable in the ordinary MLIR source.
+
 ```python
 from m2m.coverage import opaque_report, validate_op, differential_op
 opaque_report(r.mlir_text)                 # {opaque_func: count} — the worklist

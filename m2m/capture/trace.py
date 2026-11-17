@@ -1863,6 +1863,11 @@ def graph_relation(source: dict[str, Any] | None, dest: dict[str, Any] | None) -
         consumed.update(identity for relation in new for identity in relation["source_ids"])
         unknown = [identity for identity in unknown if identity not in {
             target for relation in new for target in relation["destination_ids"]}]
+    from m2m.capture.shape_trace import numel_dimension_relations
+    dimensions = numel_dimension_relations(source, dest, relations, unknown)
+    relations.extend(dimensions)
+    unknown = [identity for identity in unknown if identity not in {
+        target for relation in dimensions for target in relation["destination_ids"]}]
     introduced_guards = _introduced_metadata_guard_relations(dest, relations, unknown)
     relations.extend(introduced_guards)
     unknown = [identity for identity in unknown if identity not in {

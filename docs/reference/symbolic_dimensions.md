@@ -1,5 +1,18 @@
 # Symbolic dimensions at the FX importer boundary
 
+Frontend correspondence now accounts for the registered `aten.sym_numel`
+decomposition into actual dimension queries and their complete product. The
+`numel_dimension_queries` relation checks the original tensor/result anchors,
+static factors and exported symbolic dimension identities. Shared input symbols
+and repeated square dimensions may survive common-expression elimination; the
+proof preserves their multiplicity, including integer powers introduced by
+symbolic simplification. These identities come from the exported shape contract,
+whose actual equality/range assertions remain in the emitted MLIR. Example-size
+hints and origin tags cannot supply a missing dimension or arithmetic step.
+Unknown roots, result references, operators, scopes and incorrect factors remain
+diagnostic. This is source graph correspondence, not layout, mutation or numeric
+rewrite permission. The trace schema stays v1 with the additional relation kind.
+
 The FX importer and decomposition shape helpers distinguish an actual integer
 literal from an exported symbolic dimension. A backed `torch.SymInt` can have
 an example-size hint while still representing a range of values. Calling
