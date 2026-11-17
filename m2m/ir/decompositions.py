@@ -258,31 +258,32 @@ def _cast_scalar_arg(x, dst):
 
 def _cast_tensor(x: SSAValue, shape, dst_elem):
     """Elementwise cast a whole tensor to ``dst_elem`` (family ``cast``). Returns
-    ``(ops, result_ssa)`` or ``None`` if shapes are dynamic. A no-op (``([], x)``)
+    ``(ops, result_ssa)`` or ``None`` for an unsupported extent source. A no-op (``([], x)``)
     when the element type already matches."""
     if x.type.element_type == dst_elem:  # type: ignore[union-attr]
         return [], x
     rt = TensorType(dst_elem, list(shape))
-    return _elementwise([x], rt, lambda args, oe: _cast_scalar_arg(args[0], oe))
+    return _elementwise([x], rt, lambda args, oe: _cast_scalar_arg(args[0], oe),
+                        dynamic_extent_source=x if any(n < 0 for n in shape) else None)
 
 
 def _elementwise(
     inputs: list[SSAValue], result_type: TensorType, scalar_build, input_maps=None,
-    promote=False, dynamic_extent_source: SSAValue | None = None,
+    promote=False, dynamic_extent_source: SSAValue | None = None, dynamic_sizes=None,
 ):
     """Emit a ``linalg.generic`` elementwise op (all-parallel).
 
     ``input_maps`` (one AffineMap per input) enables broadcasting; defaults to identity
     maps (inputs must then match ``result_type``'s shape). Dynamic shapes require an
-    explicitly identical ``dynamic_extent_source``; broadcast remains static-only.
+    explicitly identical ``dynamic_extent_source`` or checked executable
+    ``dynamic_sizes`` supplied by the runtime broadcast builder.
     ``scalar_build(args, out_elem) -> (ops, yield_ssa)`` builds the scalar body.
     Returns ``(ops, result_ssa)`` or None."""
     shape = result_type.get_shape()
 
-    # Only an explicitly same-shape caller may materialize dynamic extents. General
-    # pointwise/broadcast operations remain unsupported rather than using example shapes.
+    # Extents come from actual operands or explicit checked shape computation.
     dynamic = any(d < 0 for d in shape)
-    if dynamic:
+    if dynamic and dynamic_sizes is None:
         from xdsl.dialects.builtin import DYNAMIC_INDEX
 
         if (
@@ -296,7 +297,7 @@ def _elementwise(
         ):
             return None
 
-    from xdsl.dialects.builtin import AffineMapAttr
+    from xdsl.dialects.builtin import AffineMapAttr, IndexType
     from xdsl.dialects.linalg import GenericOp, IteratorType, IteratorTypeAttr, YieldOp
     from xdsl.dialects.tensor import DimOp, EmptyOp
     from xdsl.ir import Block, Region
@@ -305,8 +306,9 @@ def _elementwise(
     rank = len(shape)
     out_elem = result_type.element_type
     extent_ops: list[Operation] = []
-    dynamic_sizes: list[SSAValue] = []
-    if dynamic:
+    supplied_sizes = dynamic_sizes
+    dynamic_sizes: list[SSAValue] = [] if supplied_sizes is None else list(supplied_sizes)
+    if dynamic and supplied_sizes is None:
         from xdsl.dialects.arith import ConstantOp
         from xdsl.dialects.builtin import IndexType, IntegerAttr
 
@@ -317,6 +319,9 @@ def _elementwise(
             dim_op = DimOp(dynamic_extent_source, axis_op.result)
             extent_ops.extend([axis_op, dim_op])
             dynamic_sizes.append(dim_op.result)
+    if (len(dynamic_sizes) != sum(n < 0 for n in shape)
+            or any(not isinstance(value.type, IndexType) for value in dynamic_sizes)):
+        return None
     empty = EmptyOp(dynamic_sizes, result_type)
 
     in_elems = [inp.type.element_type for inp in inputs]  # type: ignore[union-attr]
@@ -590,13 +595,12 @@ def _t_elem(ssa: SSAValue):
 def _binary_elementwise(operands, meta, op_name, scalar_build):
     """Binary elementwise via linalg.generic. Handles (tensor, scalar) by splatting.
 
-    Returns a DecompResult, or None to signal the caller to use the opaque fallback
-    (dynamic shapes, or operand shapes that don't already match the result -> broadcast,
-    which we don't emit yet)."""
+    Dynamic broadcasting computes actual extents and checks runtime singleton
+    compatibility. Unsupported source/type contracts retain the opaque fallback.
+    """
     val: Any = meta["val"]
     out_shape = [_coerce_static_dim(d) for d in val.shape]
-    if any(d < 0 for d in out_shape):
-        return None
+    dynamic = any(d < 0 for d in out_shape)
     lhs0_type = operands[0].type if operands else None
     if not isinstance(lhs0_type, TensorType):
         return None
@@ -628,7 +632,7 @@ def _binary_elementwise(operands, meta, op_name, scalar_build):
             scalar, scalar_left = a1, False
         else:
             return None
-        sp = _splat_scalar(scalar, result_type)
+        sp = _splat_scalar(scalar, TensorType(elem, []) if dynamic else result_type)
         if sp is None:
             return None
         pre = sp[0]
@@ -639,14 +643,19 @@ def _binary_elementwise(operands, meta, op_name, scalar_build):
     else:
         return None
 
-    # Broadcasting via affine maps (e.g. bias [N] over [M, N]); unsupported broadcasts
-    # (size-1 within matching rank) return None -> opaque fallback.
-    ml = _broadcast_map(_shape_of(lhs) or [], out_shape)
-    mr = _broadcast_map(_shape_of(rhs) or [], out_shape)
-    if ml is None or mr is None:
-        return None
+    # Static singleton projections retain affine maps. Ambiguous runtime
+    # singletons use explicit element reads in the parallel output computation.
+    if dynamic or any(n < 0 for value in (lhs, rhs) for n in value.type.get_shape()):
+        from .dynamic_pointwise import binary
 
-    em = _elementwise([lhs, rhs], result_type, scalar_build, input_maps=[ml, mr], promote=True)
+        em = binary([lhs, rhs], result_type, scalar_build, emit_elementwise=_elementwise,
+                    cast_scalar=_cast_scalar_arg)
+    else:
+        ml = _broadcast_map(_shape_of(lhs) or [], out_shape)
+        mr = _broadcast_map(_shape_of(rhs) or [], out_shape)
+        if ml is None or mr is None:
+            return None
+        em = _elementwise([lhs, rhs], result_type, scalar_build, input_maps=[ml, mr], promote=True)
     if em is None:
         return None
     ops, res = em
@@ -6071,7 +6080,18 @@ def decompose_slice_tensor(operands, meta, node_name):
     out_shape = _static_shape(getattr(val, "shape", []))
     elem = _t_elem(src)
     if any(d < 0 for d in in_shape) or any(d < 0 for d in out_shape):
-        return _opaque_decomp("aten_slice", operands[:1], meta, "layout", pattern_hint="slice")
+        from .dynamic_slices import extract_slice
+
+        result_type = TensorType(elem, [_coerce_static_dim(d) for d in val.shape])
+        result = extract_slice(src, result_type, [_fx_arg(meta, i, default)
+            for i, default in ((1, 0), (2, None), (3, None), (4, 1))])
+        if result is None:
+            return _opaque_decomp("aten_slice", operands[:1], meta, "layout", pattern_hint="slice")
+        ops, value = result
+        rid = _next_region_id("slice")
+        for op in ops:
+            _attach_region_id(op, rid)
+        return DecompResult(ops=ops, result=value, region_ids=[rid], pattern_hint="slice")
     # Rank divergence (our upstream select/squeeze collapsed size-1 dims that torch kept):
     # if element counts match, the slice is layout-only here -> reconcile via a reshape to
     # the meta shape rather than emitting an opaque placeholder.

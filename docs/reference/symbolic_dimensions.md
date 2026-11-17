@@ -96,5 +96,54 @@ actual invalid-domain aborts; they do not qualify a generic dynamic-result ABI.
 Consumers must separately check source shape-domain relations, representable
 index/scalar conversions, runtime allocation/result dimensions and their
 invocation interface. In particular, the triton2MLIR live-argument profile for
-static public models does not admit unknown symbolic dimensions. Complete
-symbolic model binding and Merlin execution remain separate integration work.
+static public models does not admit unknown symbolic dimensions. Triton2MLIR's
+separate explicit symbolic profile now independently reconstructs selected
+input-axis model signatures in Merlin. Broader result expressions, effects and
+consumer composition retain their own qualification requirements.
+
+## Dynamic surrounding pointwise computation
+
+`dynamic_pointwise` emits binary broadcasting from actual tensor dimensions.
+Static singleton axes retain affine Linalg maps, including scalar parameters
+and row/column broadcasts. When a dynamic axis might be a singleton, standard
+comparisons check that operand sizes match or one size is one. A parallel
+Linalg output computation uses explicit indexed tensor reads for that case;
+the frontend does not assume equality from two `?` markers. Empty dimensions
+follow the same rules. Result storage follows executable dimension choices,
+with checks for any declared static result extent. Numeric promotion and the
+existing half-precision Python-scalar opmath policy remain intact.
+
+This closes the surrounding `x + weight` call in an actual exported model with
+two dependent registered Triton copies, an empty slice/call and five public
+results. Its dynamic public types and original source-domain checks survive;
+neither the saved input length nor a provenance annotation supplies an extent.
+Triton2MLIR qualifies this enclosing model through native, Merlin host and Spike
+under its separate compiler/runtime contracts.
+
+## Dynamic positive-step slices
+
+`dynamic_slices` emits rank-preserving `tensor.extract_slice` from actual source
+dimensions and literal integer start/end/positive-step arguments. It normalizes
+negative bounds, clips both endpoints into the actual extent and computes the
+nonnegative length. The existing checked shape builder retains unsigned index
+round trips and logical signed-i64 size bounds without fixing native index
+width. Interval-sized arithmetic prevents overflow while clipping endpoints.
+
+Both endpoints lie in `[0, extent]`, so their nonnegative difference fits the
+checked logical i64 domain. Only after this proof is it narrowed, when needed.
+An i64 quotient/remainder computes the ceiling count without `length+step-1`
+overflow or a wide-division runtime dependency. Static result sizes require an
+executable equality check unless the source itself fixes the size, as for
+`x[:0]`. Other dynamic axes retain their real source dimensions. Type-preserving
+casts retain dynamic metadata when the actual slice has a more precise size.
+Unknown/nonliteral bounds, nonpositive steps and unsupported rank changes keep
+their explicit opaque/refusal boundary. Rejected static contracts publish no
+new operand uses. No physical view-alias or ownership promise is introduced.
+
+`tests/test_dynamic_pointwise.py` covers actual exported binary/slice models,
+independent source sizes, dynamic half opmath and invalid-bound refusals. The
+separate triton2MLIR execution tests run emitted bodies at independent sizes,
+check incompatible-broadcast aborts and include signed-i64 extreme bounds/steps.
+Those primitive tests use explicit test-driver output extents for descriptor
+allocation; they do not establish a general derived-result compiler signature.
+The enclosing-model tests independently derive their actual Merlin signatures.

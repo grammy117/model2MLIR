@@ -124,6 +124,12 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   `prov.shape_domain` records intent only; source facts cannot come from sample
   arrays, printed constraint strings or a provenance label. Data-dependent body
   ranges and general dynamic consumer interfaces keep their separate obligations.
+- Dynamic pointwise broadcasts derive actual extents and retain executable
+  compatibility checks. Ambiguous runtime singletons use standard indexed
+  tensor reads; two dynamic type markers do not prove equality. Positive-step
+  slices reuse checked interval-sized shape arithmetic, clip actual dimensions
+  and narrow only proved logical-i64 lengths before quotient/remainder.
+  Keep numeric opmath, source-domain guards and unknown-bound refusals intact.
 - That is the whole contract. Where a kernel's implementation lives and what language it is in
   belong to the consumer's kernel table, not the IR.
 - The private declaration is the hook a downstream lowering (merlin) points at the real kernel;
