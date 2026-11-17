@@ -22,9 +22,11 @@ rv64gcv and runs it on spike, is merlin's
 sits alongside `DECOMPOSITION_TABLE`. When `torch.export` produces a node whose op is in the table, the
 FX importer emits **one black-box call** for it instead of an opaque op:
 
-- tensor inputs become SSA operands, in the op **schema's** argument order;
+- tensor inputs and already-imported scalar FX values become SSA operands, in
+  the op **schema's** argument order;
 - every output becomes an SSA result, in return order;
-- non-tensor arguments (scales, block sizes, omitted defaults) are recorded by name in an attribute;
+- captured scalar literals (scales, block sizes, omitted defaults) are recorded
+  by name in an attribute;
 - the call and its private declaration are tagged `prov.kernel = "<ns>::<name>"`.
 
 model2MLIR never looks inside the kernel. Capture needs no GPU, and the kernel never runs during
@@ -40,6 +42,11 @@ without inferring the original words from F32 values.
 Lifted literal tensors additionally use [compiler constant storage](../reference/compiler_constants.md),
 keeping original ABI positions and exact source bytes in safetensors while
 leaving evaluator copies separate.
+Exported symbolic dimensions additionally retain dynamic tensor types and
+actual scalar `tensor.dim` operands through registered calls; see the
+[symbolic dimension contract](../reference/symbolic_dimensions.md). The concrete
+reference invocation does not specialize those types or establish a consumer's
+dynamic model ABI. Runtime source-domain/range checks remain a separate gate.
 
 A registered kernel call is **not** opaque: `opaque_report` skips it, `kernel_report` counts it, and
 `workloads/capture.py` prints `kernels=N`. Kernel-free models are unaffected. Their captures are
@@ -53,7 +60,7 @@ This is everything a consumer gets for a kernel:
 |---|---|---|
 | `prov.kernel` | call + declaration | identity, `"<ns>::<name>"`. The callee symbol is `<ns>__<name>`, with a `_<n>` suffix for each new shape, so match on this attribute, never on the symbol. |
 | `prov.kernel_operands` | call | schema argument name of each SSA operand, in order |
-| `prov.kernel_args` | call | non-tensor arguments by name (an absent optional is `unit`); **omitted** when there are none |
+| `prov.kernel_args` | call | captured literal arguments by name (an absent optional is `unit`); **omitted** when there are none; actual scalar SSA operands remain in `prov.kernel_operands` |
 
 Kernel calls also get the provenance tags every op gets: `prov.op` and `prov.family = "kernel"`,
 `prov.region_id`, `prov.aten` and `prov.orig_dtype`. Declarations are placed after `@forward`, so the

@@ -43,13 +43,9 @@ def _static_shape(shape_like: Any) -> list[int]:
     that materializes a dynamic ``TensorType`` must use ``DYNAMIC_INDEX``
     instead; the cast path below obtains that from the input tensor type.
     """
-    out: list[int] = []
-    for dim in shape_like:
-        try:
-            out.append(int(dim))
-        except Exception:
-            out.append(-1)
-    return out
+    from .shapes import coerce_dimension
+
+    return [coerce_dimension(dim, dynamic=-1) for dim in shape_like]
 
 
 @dataclass
@@ -571,12 +567,9 @@ def decompose_gelu(operands, meta, node_name):
 
 
 def _coerce_static_dim(d: Any) -> int:
-    try:
-        return int(d)
-    except Exception:
-        from xdsl.dialects.builtin import DYNAMIC_INDEX
+    from .shapes import coerce_dimension
 
-        return DYNAMIC_INDEX
+    return coerce_dimension(d)
 
 
 def _shape_of(ssa: SSAValue) -> list[int] | None:

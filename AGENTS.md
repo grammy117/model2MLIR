@@ -110,10 +110,14 @@ func.func @forward(...) {
 func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {prov.kernel = "triton_exp::fused_mlp2"}
 ```
 
-- Tensor inputs are SSA operands in the op **schema's** argument order (named by
+- Tensor inputs and already-imported scalar FX values are SSA operands in the op **schema's** argument order (named by
   `prov.kernel_operands`); every output is an SSA result (multi-output kernels -> multi-result
-  call). Non-tensor args (floats, ints, block sizes, omitted defaults) go in `prov.kernel_args`,
+  call). Captured scalar literals (floats, ints, block sizes, omitted defaults) go in `prov.kernel_args`,
   which is **omitted** when the kernel has none.
+- Symbolic exported dimensions retain `tensor<?>` types and real `tensor.dim`
+  operands. Never convert a backed `SymInt` hint into a static compiler fact;
+  use the shared literal-aware shape helper. Source ranges remain separate from
+  dynamic consumer ABI and execution qualification; see `docs/reference/symbolic_dimensions.md`.
 - That is the whole contract. Where a kernel's implementation lives and what language it is in
   belong to the consumer's kernel table, not the IR.
 - The private declaration is the hook a downstream lowering (merlin) points at the real kernel;

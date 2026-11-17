@@ -311,12 +311,9 @@ def _coerce_static_dim(dim: Any) -> int:
     so capture continues; downstream passes that need static shapes will
     short-circuit through their own dynamic-shape paths.
     """
-    try:
-        return int(dim)
-    except Exception:
-        from xdsl.dialects.builtin import DYNAMIC_INDEX
+    from .shapes import coerce_dimension
 
-        return DYNAMIC_INDEX
+    return coerce_dimension(dim)
 
 
 #: The only aten targets whose decompositions are written against the trailing-(re, im) pair
