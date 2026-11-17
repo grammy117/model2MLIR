@@ -778,6 +778,12 @@ class FXImporter:
         # Process call_function nodes
         for node in call_nodes:
             target_str = _canonicalize_fx_target_str(str(node.target))
+            from .runtime_symbolic_scalars import emit_integer_item
+            item = emit_integer_item(node, value_map, block, _forward_fx_meta)
+            if item is not None:
+                value_map[node.name] = item
+                self.decomposed_count += 1
+                continue
             # Exported data-dependent dimensions carry runtime constraints. Do
             # not silently drop the SymInt chain merely because it has no
             # TensorType result: its assertions restrict valid model inputs.
@@ -809,18 +815,20 @@ class FXImporter:
                     continue
             if node.target == torch.ops.aten.sym_constrain_range_for_size.default and len(node.args) == 1:
                 from xdsl.dialects import arith, cf
-                from xdsl.dialects.builtin import IndexType
+                from xdsl.dialects.builtin import IndexType, IntegerType
 
                 extent = value_map.get(getattr(node.args[0], "name", ""))
                 lower = node.kwargs.get("min")
                 upper = node.kwargs.get("max")
-                if (extent is not None and isinstance(extent.type, IndexType)
+                if (extent is not None and (isinstance(extent.type, IndexType) or extent.type == IntegerType(64))
                         and (lower is None or type(lower) is int)
-                        and (upper is None or type(upper) is int)):
+                        and (upper is None or type(upper) is int)
+                        and (isinstance(extent.type, IndexType) or all(bound is None or -(1 << 63) <= bound < 1 << 63
+                                                                     for bound in (lower, upper)))):
                     for bound, predicate in ((0 if lower is None else lower, "sge"), (upper, "sle")):
                         if bound is None:
                             continue
-                        constant = arith.ConstantOp.from_int_and_width(bound, IndexType())
+                        constant = arith.ConstantOp.from_int_and_width(bound, extent.type)
                         compare = arith.CmpiOp(extent, constant.result, predicate)
                         assertion = cf.AssertOp(compare.result, f"size constraint {predicate} {bound}")
                         for op in (constant, compare, assertion):
@@ -830,12 +838,13 @@ class FXImporter:
                     continue
             if node.target in (operator.ge, operator.le) and len(node.args) == 2:
                 from xdsl.dialects import arith
-                from xdsl.dialects.builtin import IndexType
+                from xdsl.dialects.builtin import IndexType, IntegerType
 
                 lhs = value_map.get(getattr(node.args[0], "name", ""))
                 rhs = node.args[1]
-                if lhs is not None and isinstance(lhs.type, IndexType) and type(rhs) is int:
-                    constant = arith.ConstantOp.from_int_and_width(rhs, IndexType())
+                if (lhs is not None and (isinstance(lhs.type, IndexType) or lhs.type == IntegerType(64)) and type(rhs) is int
+                        and (isinstance(lhs.type, IndexType) or -(1 << 63) <= rhs < 1 << 63)):
+                    constant = arith.ConstantOp.from_int_and_width(rhs, lhs.type)
                     compare = arith.CmpiOp(lhs, constant.result, "sge" if node.target is operator.ge else "sle")
                     for op in (constant, compare):
                         _forward_fx_meta(op, node.meta, "shape_guard")

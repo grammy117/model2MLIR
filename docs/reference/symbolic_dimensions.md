@@ -163,3 +163,23 @@ original dependent copy model and a negative-control refusal. The triton2MLIR
 derived-shape integration separately exercises shared input axes and a stepped
 slice feeding two translated kernels. Consumer signatures and allocation
 require their own independent source proof; capture alone supplies neither.
+
+## Runtime integer words
+
+`runtime_symbolic_scalars` retains `aten.item`/`aten._local_scalar_dense` on
+actual static singleton integer tensors as `tensor.extract`. Signed i8/i16/i32
+storage extends to Python's i64 integer carrier with sign extension; uint8 uses
+zero extension, and i64 stays unchanged. The original signed size constraints,
+comparisons and scalar assertions remain executable on that integer SSA.
+Unsupported element types or non-singleton sources do not invent a scalar.
+Out-of-range comparison literals cannot wrap into a different i64 guard.
+
+An unbacked symbolic size is runtime input data, never its example hint or a
+literal from range metadata. A model can now retain an integer count feeding
+registered kernels with dynamic result lengths. This import capability grants
+no allocation proof: the triton2MLIR input-word shape profile and independent
+Merlin signature v5 reconstruct the actual source reads, guards and result
+relationships before resolving invocation storage. General data-dependent
+scalar arithmetic, effectful reads and resizing state remain separate work.
+`tests/test_runtime_integer_item.py` checks signed/unsigned transport, scalar
+and singleton-matrix storage, complete dependent calls and native parsing.
