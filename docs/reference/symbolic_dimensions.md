@@ -1,5 +1,15 @@
 # Symbolic dimensions at the FX importer boundary
 
+Literal `aten.select.int` now supports actual dynamic dimensions and scalar
+results. Negative indices normalize against the selected source extent;
+executable bounds precede index transport and extraction. Static invalid indices
+refuse the lowering, rather than being clamped. Only the selected size-one axis
+is removed. Other unit axes use explicit dynamic constant-one sizes and a
+compatible result cast, preserving their identity through adjacent unit axes.
+The empty-slice refinement below also handles zero-sized retained dimensions.
+LLVM `getDroppedDims` and its `rank_reducing_slice_preserve_dropped_dims` fixture
+define the actual reduction map; no inferred physical alias permission follows.
+
 Positive-step runtime slices keep extraction in a standard `scf.if` nonempty
 branch and return a `tensor.empty` with the same actual sizes otherwise.
 This preserves clipped empty slices at the source boundary without executing

@@ -115,8 +115,20 @@ def extract_slice(source, result_type, arguments):
             "static_offsets": builtin.DenseArrayBase.from_list(builtin.i64, static_offsets),
             "static_sizes": builtin.DenseArrayBase.from_list(builtin.i64, static_sizes),
             "static_strides": builtin.DenseArrayBase.from_list(builtin.i64, static_strides)})
+    return finish_extraction(operation, block, result_type)
+
+
+def finish_extraction(operation, block, result_type):
+    """Keep possibly empty extraction behind exact standard control flow.
+
+    Rank reduction may drop static unit axes; dynamic sizes still enumerate
+    precisely the retained result axes. Callers retain original coordinates.
+    """
+    result_shape = operation.result.type.get_shape()
     if any(size <= 0 for size in result_shape):
+        sizes = tuple(operation.sizes)
         dynamic_sizes = iter(sizes)
+        builder = Builder(block, lambda *_args: None)
         zero = builder.emit(arith.ConstantOp.from_int_and_width(0, builtin.IndexType()))
         predicate = builder.emit(arith.ConstantOp.from_int_and_width(1, builtin.i1))
         for size in result_shape:

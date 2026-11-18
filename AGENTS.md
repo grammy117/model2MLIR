@@ -143,6 +143,10 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   the actual permuted source dimensions. Keep exact storage, complete valid
   axis maps and metadata/type agreement; example hints cannot specialize an
   unknown dimension. Logical transposes grant no public physical aliases.
+- Literal `aten.select.int` uses `ir/tensor_selection.py`: check signed bounds
+  before index transport, drop exactly its selected static unit axis, and keep
+  other unit axes distinct with actual mixed sizes. Invalid indices must never
+  be clamped. Scalar results and empty retained axes keep standard semantics.
 - That is the whole contract. Where a kernel's implementation lives and what language it is in
   belong to the consumer's kernel table, not the IR.
 - The private declaration is the hook a downstream lowering (merlin) points at the real kernel;

@@ -3992,43 +3992,19 @@ def decompose_upsample_nearest2d(operands, meta, node_name):
 
 
 def decompose_select_int(operands, meta, node_name):
-    """aten.select.int(input, dim, index) -> rank-reducing tensor.extract_slice (family slice)."""
+    """aten.select.int -> checked extraction dropping exactly its selected axis."""
     if not operands or not isinstance(operands[0].type, TensorType):
         return _opaque_decomp("aten_select", operands[:1], meta, "layout", pattern_hint="select")
-    src = operands[0]
-    in_shape = list(src.type.get_shape())
-    if any(d < 0 for d in in_shape):
-        return _opaque_decomp("aten_select", operands[:1], meta, "layout", pattern_hint="select")
-    rank = len(in_shape)
-    dim = int(_fx_arg(meta, 1, 0) or 0) % rank
-    index = int(_fx_arg(meta, 2, 0) or 0)
-    if index < 0:
-        index += in_shape[dim]
-    offsets = [0] * rank
-    offsets[dim] = max(0, min(index, in_shape[dim] - 1))
-    sizes = list(in_shape)
-    sizes[dim] = 1
-    from xdsl.dialects.tensor import ExtractSliceOp
-
-    # Slice at FULL rank and reshape to the traced output shape, rather than asking
-    # extract_slice to rank-reduce. A rank-reducing extract_slice drops EVERY unit dim in
-    # `sizes`, not just the selected one, so selecting from e.g. (2,1,2,6,32) yielded
-    # (2,6,32) where torch says (1,2,6,32) -- and every consumer then saw the wrong rank.
-    # (This surfaced as a permute silently falling back to opaque: the emitted transpose was
-    # ill-typed and the verify-fallback discarded it.)
     val: Any = meta.get("val")
     out_shape = _static_shape(getattr(val, "shape", [])) if val is not None else None
-    if not out_shape or any(d < 0 for d in out_shape):
+    if out_shape is None:
         return _opaque_decomp("aten_select", operands[:1], meta, "layout", pattern_hint="select")
-    elem = src.type.element_type
-    op = ExtractSliceOp.from_static_parameters(src, offsets, sizes, [1] * rank)
-    ops: list[Operation] = [op]
-    res = op.results[0]
-    red = _emit_reshape(res, list(out_shape), elem)
-    if red is None:
+    from .tensor_selection import select
+    lowered = select(operands[0], TensorType(_element_type_from_meta(meta), [_coerce_static_dim(d) for d in val.shape]),
+                     _fx_arg(meta, 1, 0), _fx_arg(meta, 2, 0))
+    if lowered is None:
         return _opaque_decomp("aten_select", operands[:1], meta, "layout", pattern_hint="select")
-    ops += red[0]
-    res = red[1]
+    ops, res = lowered
     rid = _next_region_id("select")
     for o in ops:
         _attach_region_id(o, rid)
