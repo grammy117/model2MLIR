@@ -124,8 +124,21 @@ def registered_kernel_targets(graph: Any) -> set[str]:
     """``str(node.target)`` of every call node in ``graph`` that is a registered kernel. Used
     to mark them supported for the unsupported-op loop and to skip torch-mlir (which can't
     legalize custom ops) when a graph contains any."""
-    return {str(n.target) for n in graph.nodes
-            if n.op == "call_function" and lookup_kernel(n.target) is not None}
+    return {str(n.target) for n in graph.nodes if n.op == "call_function"
+            and (lookup_kernel(n.target) is not None or functional_kernel(n) is not None)}
+
+
+def functional_kernel(node):
+    """Resolve only the actual supported Torch higher-order operator object."""
+    spec = lookup_kernel(node.args[0]) if len(node.args) == 1 else None
+    if spec is None:
+        return None
+    try:
+        from torch._higher_order_ops.auto_functionalize import auto_functionalized_v2
+    except ImportError:
+        return None
+
+    return spec if node.target is auto_functionalized_v2 else None
 
 
 def is_triton_op(target: Any) -> bool:
@@ -197,6 +210,12 @@ def emit_kernel_call(
     bound = normalize_function(target, tuple(node.args), dict(node.kwargs),
                                normalize_to_only_use_kwargs=True)
     kwargs = dict(bound.kwargs) if bound is not None else dict(node.kwargs)
+
+    return _emit_bound_call(spec, schema, kwargs, value_map, result_types)
+
+
+def _emit_bound_call(spec, schema, kwargs, value_map, result_types):
+    """Build schema-ordered arguments after the caller validates its source form."""
 
     operands: list[SSAValue] = []
     operand_names: list[str] = []

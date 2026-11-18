@@ -563,7 +563,7 @@ class FXImporter:
             return False
 
     def _lower_kernel(self, spec, node, value_map, multi_results, block,
-                      kernel_decls, kernel_sigs, kernel_names) -> None:
+                      kernel_decls, kernel_sigs, kernel_names, *, functionalized=False) -> None:
         """Emit a registered kernel as a black-box ``func.call`` (see m2m.ir.kernel_registry).
 
         Result types come from ``meta["val"]`` in return order; a tuple-returning kernel
@@ -576,9 +576,14 @@ class FXImporter:
         vals = list(val) if isinstance(val, (tuple, list)) else ([val] if val is not None else [])
         result_types = [_tensor_type_from_meta(v) for v in vals]
         try:
-            if any(t is None for t in result_types):
-                raise KernelLoweringError(f"{spec.qualname}: non-tensor result in {val}")
-            result = emit_kernel_call(spec, node, value_map, result_types)
+            slots = None
+            if functionalized:
+                from .functional_kernels import emit
+                result, slots = emit(spec, node, value_map, _tensor_type_from_meta)
+            else:
+                if any(t is None for t in result_types):
+                    raise KernelLoweringError(f"{spec.qualname}: non-tensor result in {val}")
+                result = emit_kernel_call(spec, node, value_map, result_types)
         except (KernelLoweringError, TypeError, ValueError) as err:
             self.diagnostics.append(ImportDiagnostic(
                 fx_node=node.name, level="error", message=f"Kernel lowering failed: {err}"))
@@ -601,7 +606,10 @@ class FXImporter:
         if result.result is not None:
             value_map[node.name] = result.result
         if isinstance(val, (tuple, list)):
-            multi_results[node.name] = list(result.results)
+            multi_results[node.name] = (list(result.results) if slots is None else
+                [result.results[index] if index >= 0 else None for index in slots])
+        if slots is not None:
+            self._functional_slots[node.name] = slots
         self.kernel_count += 1
         self.diagnostics.append(ImportDiagnostic(
             fx_node=node.name, level="info",
@@ -703,7 +711,8 @@ class FXImporter:
         # Build the function body
         block = Block(arg_types=arg_types)
         value_map: dict[str, SSAValue] = {}
-        multi_results: dict[str, list[SSAValue]] = {}  # split/unbind: node -> per-output SSA
+        multi_results: dict[str, list[SSAValue | None]] = {}  # tuple slots; functional void slot is None
+        self._functional_slots = {}
         for i, p in enumerate(placeholders):
             value_map[p.name] = block.args[i]
         from .shape_domains import emit_entry_shape_guards
@@ -947,15 +956,44 @@ class FXImporter:
                 self._lower_kernel(spec, node, value_map, multi_results, block,
                                    kernel_decls, kernel_sigs, kernel_names)
                 continue
-            # In-place (mutates_args) kernels arrive wrapped as auto_functionalized{,_v2}(op,
-            # **kwargs). The tied-result form for those isn't implemented yet: fail loudly for a
-            # registered kernel rather than let the generic path emit an operand-less call.
+            from .kernel_registry import functional_kernel
+            functional_spec = functional_kernel(node)
+            if functional_spec is not None:
+                self._lower_kernel(functional_spec, node, value_map, multi_results, block,
+                    kernel_decls, kernel_sigs, kernel_names, functionalized=True)
+                continue
+            # Other functionalization wrappers need their own source contracts;
+            # never let them become operand-less generic calls for registered kernels.
             if ("auto_functionalized" in target_str and node.args
                     and lookup_kernel(node.args[0]) is not None):
                 self.diagnostics.append(ImportDiagnostic(
                     fx_node=node.name, level="error",
                     message=(f"registered kernel {node.args[0]} mutates its arguments "
                              f"(auto_functionalized); in-place kernels are not supported yet")))
+                continue
+
+            if (node.target is operator.getitem and len(node.args) == 2
+                    and getattr(node.args[0], "name", None) in self._functional_slots):
+                producer = node.args[0]
+                slots = self._functional_slots[producer.name]
+                index = node.args[1]
+                if type(index) is not int or not -len(slots) <= index < len(slots):
+                    self.diagnostics.append(ImportDiagnostic(node.name, "error", "functional kernel tuple index is invalid"))
+                    continue
+                index %= len(slots)
+                if slots[index] < 0:
+                    if node.users:
+                        self.diagnostics.append(ImportDiagnostic(node.name, "error", "functional kernel has a live None result"))
+                    else:
+                        source_id = node.meta.get("_m2m_node_id")
+                        if source_id:
+                            self.trace_dispositions[source_id] = {"status": "eliminated", "reason": "unused explicit None tuple slot"}
+                    continue
+                value_map[node.name] = multi_results[producer.name][index]
+                source_id = node.meta.get("_m2m_node_id")
+                if source_id:
+                    self.trace_dispositions[source_id] = {"status": "alias", "alias_of_node_id": producer.meta.get("_m2m_node_id"),
+                        "result_index": index, "mlir_result_index": slots[index]}
                 continue
 
             result_type = node_types.get(node.name)
@@ -1246,6 +1284,15 @@ class FXImporter:
 
         region = Region([block])
         main_func = FuncOp("forward", func_type, region)
+        from .functional_state import ATTRIBUTE, check_types, output_contract
+        try:
+            state_contract = output_contract(exported_program)
+            check_types(state_contract, arg_types, list(func_type.outputs))
+            if state_contract is not None:
+                import json
+                main_func.attributes[ATTRIBUTE] = StringAttr(json.dumps(state_contract, sort_keys=True))
+        except ValueError as err:
+            self.diagnostics.append(ImportDiagnostic("output", "error", str(err)))
         if shape_domain is not None:
             import json
             main_func.attributes["prov.shape_domain"] = StringAttr(json.dumps(shape_domain, sort_keys=True))

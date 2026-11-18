@@ -81,16 +81,56 @@ That belongs to the consumer's table. An early draft also emitted `prov.kernel_b
 | Transforms | `m2m/transforms/` | `split_by_section` now takes the first function **with a body** as the entry point and re-declares each section's callees. Before, it picked a declaration and returned no sections. `fuse_int2_unpack` no longer matches kernel calls by callee substring. |
 | Workloads | `workloads/mlp_basic/`, `workloads/mlp_basic_triton/` | The same 3-layer MLP (16 → 32 → 32 → 8, same seed, weights and input), first in plain PyTorch, then with fc1+relu+fc2+relu as one Triton op, `torch.ops.triton_exp.fused_mlp2` (`kernels.py`). |
 
-Errors are explicit. A registered kernel that cannot be represented faithfully, such as one that
-mutates an argument or has an unresolved tensor operand, raises `KernelLoweringError`, and the importer
+Errors are explicit. A registered kernel that cannot be represented faithfully, such as one with
+an unproved mutated view or an unresolved tensor operand, raises `KernelLoweringError`, and the importer
 reports an error diagnostic instead of emitting wrong IR. An **unregistered** Triton op still lowers
 through the generic opaque path, with a diagnostic that points at the registry.
+
+### Functional mutation and explicit state results
+
+The experimental `ttir-experiment-grammy` frontend now handles Torch 2.10's actual
+`auto_functionalized_v2` operator for distinct whole mutable Tensor bases. Source
+review uses the installed `torch/_higher_order_ops/auto_functionalize.py`, specifically
+`auto_functionalized_v2_dense` and `_generate_new_op_kwargs_from_bases`: ordinary
+returns precede the complete updated base roster. A void source op reserves a None
+tuple slot before its updated bases; this slot is never fabricated as a Tensor.
+
+Calls retain `prov.kernel_functionalization = "m2m.functional-kernel-bases.v1"`,
+the original `prov.kernel_source_schema`, complete `prov.kernel_mutated` names,
+`prov.kernel_tied` argument/base/operand/result bindings, and raw
+`prov.kernel_result_slots` (-1 for the unused void slot). SSA results preserve
+both ordinary observations and subsequent state, including two dependent calls.
+Nontrivial views, Tensor lists/optional bases, repeated mutable bases, explicit
+clone overrides and aliased/non-Tensor returns remain located refusals.
+
+Public input or registered-buffer mutation additionally selects
+`prov.functional_state` on `@forward`, with schema
+`m2m.functional-state-results.v1`. It records every state result's exact exported
+input and target, plus every user-result ordinal. These are explicit functional
+state ports: inputs remain borrowed tensor values. Public physical aliases and
+automatic caller copyback are separate invocation contracts, not inferred here.
+
+Bundle eager observation uses copied inputs while preserving their shared
+storage, snapshots updated buffers/results, and restores original buffers before
+conversion or serialization. References follow the complete exported output
+order, including state ports; `golden.npy` remains the first exported result.
+`meta.json` records `functional_state` and the full output ABI. Original input
+and buffer archives retain initial values. Shared input/buffer storage and
+metadata-changing buffers need additional reference invocation support and refuse.
+Frontend traces additionally record typed output specs and the functionalized
+call's original schema. These records grant no downstream effect equivalence.
+
+`tests/test_functional_kernels.py` exercises internal/public/buffer mutation,
+dependent calls, multiple bases, dynamic public types, reused/direct conversion,
+region capture, exact initial/reference archives and forged/unsupported forms.
+The native kernel body and consumer must separately check the tied memory effects
+and execute every result before claiming end-to-end support.
 
 ## Limitations
 
 | gap | today | what it needs |
 |---|---|---|
-| Kernels that write into their arguments (`mutates_args`, such as an `out=` buffer) | `torch.export` wraps them in `auto_functionalized_v2`. A registered one is an **import error**. An unregistered one takes the generic opaque path, which loses its operands without flagging it. | Rebuild the schema arguments, taking the mutated buffer from `_all_bases[...]`. Emit destination-passing style: the buffer's initial value becomes an operand, and the results are the op's returns plus one new value per mutated argument, tagged `prov.kernel_mutated` / `prov.kernel_tied`. Remap `getitem`. Refuse view arguments (`_<arg>_size` / `_stride`). Probe the `meta["val"]` slot layout for ops that both return and mutate first. |
+| Kernels that write into their arguments (`mutates_args`, such as an `out=` buffer) | Distinct whole Tensor bases use the explicit functional profiles above. | General mutated views/shared bases/optional lists, physical aliases, caller copyback and consumer qualification remain separate work. |
 | Unregistered custom ops | Generic opaque path: non-tensor arguments are dropped and only the first output is kept | Register them, or extend the same binding to the opaque path |
 | One symbol per shape only | Two calls with the same shapes but different `prov.kernel_args` share a symbol | Key symbols by arguments too, once a consumer reads `kernel_args` |
 | Registration | One global built-in table, with no per-workload registration | By design for now |

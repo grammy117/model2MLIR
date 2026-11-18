@@ -253,6 +253,14 @@ def snapshot_exported_program(exported: Any, *, stage: str) -> dict[str, Any]:
                 if target in operator_schemas and operator_schemas[target] != text:
                     raise ValueError("frontend operator schema changed during snapshot")
                 operator_schemas[target] = text
+            functionalization = None
+            if node.op == "call_function":
+                from m2m.ir.kernel_registry import functional_kernel
+                if functional_kernel(node) is not None:
+                    from m2m.ir.functional_kernels import PROFILE
+                    inner = node.args[0]
+                    operator_schemas[str(inner)] = str(inner._schema)
+                    functionalization = {"profile": PROFILE, "operator": str(inner), "schema": str(inner._schema)}
             classification = ("aten" if target.startswith("aten.") else
                               "custom" if node.op == "call_function" else
                               "call" if node.op in {"call_method", "call_module"} else "structural")
@@ -269,6 +277,8 @@ def snapshot_exported_program(exported: Any, *, stage: str) -> dict[str, Any]:
                             "input_target": getattr(spec, "target", None),
                             "transformation": custom.get("m2m_transform"),
                             "origin_node_ids": [v for v in prior if v != node_id]})
+            if functionalization is not None:
+                records[-1]["functionalization"] = functionalization
     body = {"schema": "m2m.frontend_graph.v1", "stage": stage, "status": "complete",
             "graph_id": f"g:{stage}:root", "nodes": records, "edges": edges,
             "operator_schemas": dict(sorted(operator_schemas.items())),
@@ -278,6 +288,9 @@ def snapshot_exported_program(exported: Any, *, stage: str) -> dict[str, Any]:
             "by_target": dict(sorted(Counter(n["target"] for n in records
                               if n["op"] in {"call_function", "call_method", "call_module"}).items())),
             "graph_signature": str(sig),
+            "output_specs": [{"kind": spec.kind.name, "target": spec.target,
+                              "argument": getattr(spec.arg, "name", None)}
+                             for spec in getattr(sig, "output_specs", ())],
             "range_constraints": {str(k): str(v) for k, v in
                                   (getattr(exported, "range_constraints", {}) or {}).items()},
             "runtime_versions": {"torch": __import__("torch").__version__}}

@@ -167,11 +167,11 @@ def _capture_region_goldens(mdl, inputs, fqns) -> dict[str, "np.ndarray"]:
             for k, a in enumerate(args):
                 if isinstance(a, torch.Tensor):
                     caught[_REGION_KEY.format(fqn=fqn, slot=f"in{k}")] = \
-                        a.detach().float().cpu().numpy()
+                        a.detach().float().cpu().numpy().copy()
             out_t = output[0] if isinstance(output, (tuple, list)) else output
             if isinstance(out_t, torch.Tensor):
                 caught[_REGION_KEY.format(fqn=fqn, slot="out")] = \
-                    out_t.detach().float().cpu().numpy()
+                    out_t.detach().float().cpu().numpy().copy()
         return hook
 
     for fqn in fqns:
@@ -519,7 +519,8 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
                 "eager_fp32 quality.reference_values trajectory")
 
     weights_path = str(out / "weights.safetensors")
-    eager_output = None
+    from m2m.capture.eager_state import functional_outputs, observe
+    eager_observation = None
     if conversion_result is not None:
         if quant is not None and not quantization_preapplied:
             raise ValueError("reusing a conversion requires the actual prequantized model")
@@ -544,8 +545,7 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
             # Export can leave Python-side caches holding FakeTensors. Capture
             # real reference outputs before tracing the selected model, after
             # any requested quantization has actually been applied.
-            with torch.no_grad():
-                eager_output = runtime_mdl(*inputs)
+            eager_observation = observe(runtime_mdl, inputs)
         r = m2m.convert(mdl, inputs, backend="fx_importer", quantization=quant,
                         level="linalg-on-tensors", weights_path=weights_path,
                         quantization_preapplied=quantization_preapplied,
@@ -554,6 +554,15 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
     assert r.ok, "m2m.convert failed"
     if conversion_result is not None:
         runtime_mdl = mdl.module() if isinstance(mdl, torch.export.ExportedProgram) else mdl
+    from m2m.ir.functional_state import ATTRIBUTE, output_contract
+    from xdsl.dialects.builtin import StringAttr
+    from xdsl.dialects.func import FuncOp
+    state_contract = output_contract(r.exported_program) if r.exported_program is not None else None
+    entries = [op for op in r.module.ops if isinstance(op, FuncOp) and op.sym_name.data == "forward"]
+    state_attr = entries[0].attributes.get(ATTRIBUTE) if len(entries) == 1 else None
+    expected_state = StringAttr(json.dumps(state_contract, sort_keys=True)) if state_contract is not None else None
+    if state_attr != expected_state:
+        raise ValueError("bundle functional state contract differs from its actual exported program")
     (out / "model.mlir").write_text(r.mlir_text, encoding="utf-8")
     trace_pointer = None
     if capture_trace:
@@ -611,15 +620,21 @@ def write_bundle(mdl, inputs, out: str | Path, *, quant=None, capture_regions: b
     n_regions = 0
     if capture_regions:
         fqns = _extract_prov_fqns(r.mlir_text)
-        region_goldens, g = _capture_region_goldens(runtime_mdl, inputs, fqns)
+        eager_observation = observe(runtime_mdl, inputs,
+            lambda arguments: _capture_region_goldens(runtime_mdl, arguments, fqns))
+        region_goldens, eager_g = eager_observation.output
+        eager_observation.output = eager_g
         if region_goldens:
             np.savez(out / "region_goldens.npz", **region_goldens)
         n_regions = len({k.split("::", 1)[0] for k in region_goldens})
-    elif eager_output is not None:
-        g = eager_output
-    else:
-        with torch.no_grad():
-            g = runtime_mdl(*inputs)
+    elif eager_observation is None:
+        eager_observation = observe(runtime_mdl, inputs)
+    g = functional_outputs(eager_observation, r.exported_program, state_contract)
+    if state_contract is not None:
+        meta_path = out / "meta.json"
+        merged = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        merged["functional_state"] = state_contract
+        meta_path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
     selected_quality_outputs = (tuple(value.detach().cpu().clone() for value in _tensor_outputs(g))
                                 if capture_quantization_quality else None)
     from m2m.capture.tensor_words import TensorWordArchives

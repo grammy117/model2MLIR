@@ -162,8 +162,17 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   `src/merlin/kernels/triton_llvmir/`) and links it into the model's MLIR before lowering. A
   kernel registered here needs a matching merlin entry before its captures can run; merlin's
   `test_table_keys_match_m2m_registry` fails until it has one.
-- Not yet supported: in-place kernels (`mutates_args`, which export wraps in
-  `auto_functionalized_v2`). A registered one is an import **error**, never silently wrong IR.
+- Whole distinct Tensor bases in the actual `auto_functionalized_v2` operator
+  retain ordinary returns followed by complete updated bases. Preserve the exact
+  `prov.kernel_functionalization` profile, original schema, mutated arguments,
+  operand/result ties and raw tuple slots (including the void None slot).
+  Nontrivial mutated views, shared mutable bases and clone overrides refuse.
+  Public input/buffer mutation additionally requires `prov.functional_state`
+  (`m2m.functional-state-results.v1`) from the typed export signature. Entry
+  inputs remain borrowed values; public copyback/aliases need an invocation adapter.
+  Bundle references include every state result before the user results in export
+  order. Eager observation preserves initial input/buffer archives; provenance
+  alone supplies no effect or alias permission.
 - How it is implemented, its limitations, and how to use it (the end-to-end MLP example):
   `docs/guides/triton_kernel_integration.md`.
 

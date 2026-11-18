@@ -201,9 +201,8 @@ def test_unregistered_custom_op_stays_opaque():
     assert any(k.startswith("m2m_test_scale_add") for k in opaque_report(r.mlir_text))
 
 
-def test_mutating_kernel_is_an_error(registered):
-    """In-place kernels (auto_functionalized) aren't supported yet: a registered one must fail
-    loudly instead of lowering to an operand-less call."""
+def test_mutating_kernel_keeps_updated_tensor_and_void_slot(registered):
+    """A void mutable source call returns its complete updated tensor base."""
 
     class _M(nn.Module):
         def forward(self, x, y):
@@ -212,8 +211,11 @@ def test_mutating_kernel_is_an_error(registered):
             return out * 2
 
     r = m2m.convert(_M().eval(), _inputs(), backend="fx_importer")
-    assert not r.ok
-    assert any("in-place kernels are not supported" in d for d in r.diagnostics)
+    assert r.ok, r.diagnostics
+    call = next(op for op in r.module.walk() if op.name == "func.call")
+    assert len(call.operands) == 3 and len(call.results) == 1
+    assert call.attributes["prov.kernel_functionalization"].data == "m2m.functional-kernel-bases.v1"
+    assert [value.value.data for value in call.attributes["prov.kernel_result_slots"]] == [-1, 0]
 
 
 # --- downstream passes leave kernels alone ---------------------------------------------------
