@@ -166,13 +166,22 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   retain ordinary returns followed by complete updated bases. Preserve the exact
   `prov.kernel_functionalization` profile, original schema, mutated arguments,
   operand/result ties and raw tuple slots (including the void None slot).
-  Nontrivial mutated views, shared mutable bases and clone overrides refuse.
+  Nontrivial views/shared bases select `m2m.functional-kernel-storage.v1`:
+  one complete dense zero-origin root per base plus actual i64 coordinate SSA.
+  Preserve `prov.kernel_storage_bases` / `prov.kernel_storage_views`, complete
+  base ties and all geometry guards. Never lower overlapping mutable arguments
+  as independent extract/update/scatter calls. Nondense/hidden storage, optional
+  lists and clone overrides need additional explicit contracts and refuse.
   Public input/buffer mutation additionally requires `prov.functional_state`
   (`m2m.functional-state-results.v1`) from the typed export signature. Entry
   inputs remain borrowed values; public copyback/aliases need an invocation adapter.
   Bundle references include every state result before the user results in export
   order. Eager observation preserves initial input/buffer archives; provenance
   alone supplies no effect or alias permission.
+  Source view/coordinate trace accounting requires original schemas/owners,
+  exact regenerated Torch geometry and closed actual scalar dependencies;
+  symbolic tags alone cannot account for changed arithmetic. Unavailable
+  subclass storage metadata stays unobserved, without invented offsets.
 - How it is implemented, its limitations, and how to use it (the end-to-end MLP example):
   `docs/guides/triton_kernel_integration.md`.
 

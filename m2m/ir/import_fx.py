@@ -588,10 +588,14 @@ class FXImporter:
             self.diagnostics.append(ImportDiagnostic(
                 fx_node=node.name, level="error", message=f"Kernel lowering failed: {err}"))
             return
-        call = result.ops[0]
+        calls = [operation for operation in result.ops if isinstance(operation, CallOp)]
+        if len(calls) != 1 or calls[0] is not result.ops[-1]:
+            raise ValueError("registered kernel lowering must end in one complete call")
+        call = calls[0]
         meta = dict(node.meta)
         meta["_aten_target"] = _canonicalize_fx_target_str(str(node.target))  # source torch op
-        _forward_fx_meta(call, meta, result.pattern_hint)
+        for operation in result.ops:
+            _forward_fx_meta(operation, meta, result.pattern_hint)
         sig = (spec.callee, tuple(str(v.type) for v in call.operands),
                tuple(str(r.type) for r in call.results))
         if sig not in kernel_sigs:
@@ -602,7 +606,7 @@ class FXImporter:
             kernel_sigs[sig] = symbol
             kernel_decls.append(kernel_decl(spec, symbol, call))
         call.properties["callee"] = FlatSymbolRefAttr_ref(kernel_sigs[sig])
-        block.add_op(call)
+        block.add_ops(result.ops)
         if result.result is not None:
             value_map[node.name] = result.result
         if isinstance(val, (tuple, list)):

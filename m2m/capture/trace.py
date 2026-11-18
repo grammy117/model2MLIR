@@ -257,10 +257,15 @@ def snapshot_exported_program(exported: Any, *, stage: str) -> dict[str, Any]:
             if node.op == "call_function":
                 from m2m.ir.kernel_registry import functional_kernel
                 if functional_kernel(node) is not None:
-                    from m2m.ir.functional_kernels import PROFILE
+                    from m2m.ir.functional_kernels import PROFILE, storage_required
+                    from m2m.ir.storage_kernels import PROFILE as STORAGE_PROFILE
                     inner = node.args[0]
                     operator_schemas[str(inner)] = str(inner._schema)
-                    functionalization = {"profile": PROFILE, "operator": str(inner), "schema": str(inner._schema)}
+                    functionalization = {"profile": STORAGE_PROFILE if storage_required(node) else PROFILE,
+                                         "operator": str(inner), "schema": str(inner._schema)}
+                    if storage_required(node):
+                        from m2m.capture.mutation_views import regenerated
+                        functionalization["views"] = regenerated(node)
             classification = ("aten" if target.startswith("aten.") else
                               "custom" if node.op == "call_function" else
                               "call" if node.op in {"call_method", "call_module"} else "structural")
@@ -279,6 +284,14 @@ def snapshot_exported_program(exported: Any, *, stage: str) -> dict[str, Any]:
                             "origin_node_ids": [v for v in prior if v != node_id]})
             if functionalization is not None:
                 records[-1]["functionalization"] = functionalization
+            if "val" in node.meta:
+                from m2m.capture.mutation_views import expression, geometry
+                val = node.meta["val"]
+                items = list(val) if isinstance(val, (tuple, list)) else [val]
+                if any(geometry(item) is not None for item in items):
+                    records[-1]["storage_geometry"] = [geometry(item) for item in items]
+                elif expression(val) is not None:
+                    records[-1]["integer_expression"] = expression(val)
     body = {"schema": "m2m.frontend_graph.v1", "stage": stage, "status": "complete",
             "graph_id": f"g:{stage}:root", "nodes": records, "edges": edges,
             "operator_schemas": dict(sorted(operator_schemas.items())),
@@ -1896,6 +1909,12 @@ def graph_relation(source: dict[str, Any] | None, dest: dict[str, Any] | None) -
     consumed.update(identity for relation in views for identity in relation["source_ids"])
     unknown = [identity for identity in unknown if identity not in {
         target for relation in views for target in relation["destination_ids"]}]
+    from m2m.capture.mutation_views import relations as storage_relations
+    storage = storage_relations(source, dest, relations, consumed, unknown)
+    relations.extend(storage)
+    consumed.update(identity for relation in storage for identity in relation["source_ids"])
+    unknown = [identity for identity in unknown if identity not in {
+        target for relation in storage for target in relation["destination_ids"]}]
     dead = _dead_forward_value_relations(source, consumed)
     relations.extend(dead)
     consumed.update(origin for relation in dead for origin in relation["source_ids"])

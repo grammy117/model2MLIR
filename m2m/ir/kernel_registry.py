@@ -214,13 +214,15 @@ def emit_kernel_call(
     return _emit_bound_call(spec, schema, kwargs, value_map, result_types)
 
 
-def _emit_bound_call(spec, schema, kwargs, value_map, result_types):
+def _emit_bound_call(spec, schema, kwargs, value_map, result_types, *, omitted=frozenset()):
     """Build schema-ordered arguments after the caller validates its source form."""
 
     operands: list[SSAValue] = []
     operand_names: list[str] = []
     scalars: dict[str, Attribute] = {}
     for arg in schema.arguments:
+        if arg.name in omitted:
+            continue
         if arg.name in kwargs:
             value = kwargs[arg.name]
         elif arg.has_default_value():

@@ -100,8 +100,9 @@ the original `prov.kernel_source_schema`, complete `prov.kernel_mutated` names,
 `prov.kernel_tied` argument/base/operand/result bindings, and raw
 `prov.kernel_result_slots` (-1 for the unused void slot). SSA results preserve
 both ordinary observations and subsequent state, including two dependent calls.
-Nontrivial views, Tensor lists/optional bases, repeated mutable bases, explicit
-clone overrides and aliased/non-Tensor returns remain located refusals.
+Nontrivial views and repeated mutable bases additionally select the storage
+profile below. Tensor lists/optional bases, explicit clone overrides and
+aliased/non-Tensor returns remain located refusals.
 
 Public input or registered-buffer mutation additionally selects
 `prov.functional_state` on `@forward`, with schema
@@ -126,11 +127,43 @@ region capture, exact initial/reference archives and forged/unsupported forms.
 The native kernel body and consumer must separately check the tied memory effects
 and execute every result before claiming end-to-end support.
 
+### Shared mutable storage and view coordinates
+
+`m2m.functional-kernel-storage.v1` additionally groups slice/as-strided/alias
+arguments by their actual `_all_bases` entry. Each complete base appears once as
+a synthetic `@base<i>` operand. Readonly schema operands retain their order;
+mutable view operands become storage relationships rather than copied values.
+Complete updated bases follow ordinary kernel results, with one tie per base.
+
+`prov.kernel_storage_bases` names each base operand and actual dimension fields.
+`prov.kernel_storage_views` records each mutable argument, base index, view kind
+and named size/stride/offset fields. Every field is real logical i64 SSA: source
+constants, imported scalar values or actual tensor dimensions and checked
+arithmetic. Index transport checks round trips and signed size bounds. Source
+slice endpoints are checked before computing offsets/sizes. All prefix operations
+retain the original kernel's provenance and remain in the executable MLIR.
+
+This preserves updates observed through overlapping arguments inside a single
+kernel. Independent extraction and scattering of each mutable argument would
+change that behavior. The initial storage profile requires proved dense,
+zero-origin bases; hidden/nondense storage and unsupported metadata still refuse.
+Kernel consumers must bind each view's actual original pointer position and
+offset to the same translated readwrite allocation before inlining its body.
+
+Frontend snapshots additionally observe exact Torch-regenerated view geometry
+using the selected upstream ViewInfo implementations. Structured symbolic
+expressions never observe backed hints. View/coordinate correspondence requires
+original schemas, actual base ancestry, exact geometry, closed scalar dependency
+trees and matching observed expressions. Changing arithmetic while retaining a
+symbolic tag cannot establish correspondence. Unavailable subclass storage stays
+unobserved; these records supply no custom-writer/numeric equivalence or memory
+permission. Original parent snapshots and complete final SSA remain mandatory.
+
 ## Limitations
 
 | gap | today | what it needs |
 |---|---|---|
-| Kernels that write into their arguments (`mutates_args`, such as an `out=` buffer) | Distinct whole Tensor bases use the explicit functional profiles above. | General mutated views/shared bases/optional lists, physical aliases, caller copyback and consumer qualification remain separate work. |
+| Kernels that write into their arguments (`mutates_args`, such as an `out=` buffer) | Whole bases and qualified shared views use the explicit functional profiles above. | General storage layouts/optional lists, physical aliases, caller copyback and broader consumer qualification remain separate work. |
 | Unregistered custom ops | Generic opaque path: non-tensor arguments are dropped and only the first output is kept | Register them, or extend the same binding to the opaque path |
 | One symbol per shape only | Two calls with the same shapes but different `prov.kernel_args` share a symbol | Key symbols by arguments too, once a consumer reads `kernel_args` |
 | Registration | One global built-in table, with no per-workload registration | By design for now |

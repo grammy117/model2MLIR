@@ -25,6 +25,15 @@ from .kernel_registry import (
 PROFILE = "m2m.functional-kernel-bases.v1"
 
 
+def storage_required(node):
+    """Select a storage-root contract when source views share or reshape bases."""
+    arguments = [arg for arg in node.args[0]._schema.arguments if arg.alias_info is not None and arg.alias_info.is_write]
+    positions = [node.kwargs.get("_" + arg.name + "_base_index") for arg in arguments]
+    fields = {"_" + arg.name + suffix for arg in arguments
+              for suffix in ("_size", "_stride", "_storage_offset", "_slice_dim", "_slice_start", "_slice_end")}
+    return bool(fields.intersection(node.kwargs)) or len(set(positions)) != len(positions)
+
+
 def emit(spec, node, value_map, tensor_type):
     if functional_kernel(node) != spec:
         raise KernelLoweringError("mutating kernels require the actual auto_functionalized_v2 source operator")
@@ -54,6 +63,9 @@ def emit(spec, node, value_map, tensor_type):
         raise KernelLoweringError("functional kernel returns cannot alias source arguments")
     if any(types[ordinary+i] != value_map[base.name].type for i, base in enumerate(bases)):
         raise KernelLoweringError("functional kernel changes a cloned base's tensor type")
+    if storage_required(node):
+        from .storage_kernels import emit as emit_storage
+        return emit_storage(spec, node, value_map, bases, mutated, ordinary, types)
     base_arguments = {}
     for arg in mutated:
         position = kwargs.pop("_" + arg.name + "_base_index", None)

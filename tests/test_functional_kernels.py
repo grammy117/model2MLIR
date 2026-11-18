@@ -144,14 +144,102 @@ def test_two_distinct_mutable_bases_keep_original_return_and_state_order():
     assert len(json.loads(entry(converted).attributes[ATTRIBUTE].data)["state_outputs"]) == 2
 
 
-def test_nontrivial_mutated_views_are_located_refusals():
+def test_mutated_slice_retains_complete_storage_and_source_view_coordinates():
     class Model(torch.nn.Module):
         def forward(self, x):
             old = bump(x[1:])
             return old, x
     converted = m2m.convert(Model(), (torch.arange(5),), backend="fx_importer")
+    assert converted.ok, converted.diagnostics
+    call = next(op for op in converted.module.walk() if isinstance(op, CallOp))
+    assert call.attributes["prov.kernel_functionalization"].data == "m2m.functional-kernel-storage.v1"
+    assert call.attributes["prov.kernel_storage_views"].data[0].data["kind"].data == "slice"
+    assert call.attributes["prov.kernel_storage_bases"].data[0].data["operand"].data == "@base0"
+    assert len(call.results) == 2 and call.results[0].type.get_shape() == (4,) and call.results[1].type.get_shape() == (5,)
+
+
+@pytest.mark.parametrize("kind", ("slice", "stride", "same", "matrix"))
+def test_shared_mutable_views_remain_one_complete_base(kind):
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            if kind == "slice":
+                left, right = x[1:-1], x[2:]
+            elif kind == "stride":
+                left, right = x[::2], x[1::2]
+            elif kind == "matrix":
+                left, right = x[:, 1], x[:, -1]
+            else:
+                left, right = x[1:-1], x[1:-1]
+            a, b = pair(left, right)
+            return a, b, x
+    x = torch.arange(24).reshape(4, 6) if kind == "matrix" else torch.arange(12)
+    dynamic = None if kind == "matrix" else ({0: torch.export.Dim("length", min=4, max=31)},)
+    exported = torch.export.export(Model(), (x,), dynamic_shapes=dynamic)
+    converted = m2m.convert(exported, (x,), backend="fx_importer", capture_trace=True)
+    assert converted.ok, converted.diagnostics
+    converted.module.verify()
+    calls = [op for op in converted.module.walk() if isinstance(op, CallOp)]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call.attributes["prov.kernel_functionalization"].data == "m2m.functional-kernel-storage.v1"
+    assert len(call.results) == 3 and len(call.attributes["prov.kernel_tied"]) == 1
+    views = call.attributes["prov.kernel_storage_views"]
+    assert len(views) == 2 and all(view.data["base_index"].value.data == 0 for view in views)
+    assert len(call.attributes["prov.kernel_storage_bases"]) == 1
+    assert converted.capture_trace["status"] == "complete", converted.capture_trace["blockers"]
+
+
+@pytest.mark.parametrize("damage", ("geometry", "base", "offset", "schema", "missing-source"))
+def test_storage_view_accounting_requires_original_geometry_and_ownership(damage):
+    from m2m.capture.trace import graph_relation
+
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            a, b = pair(x[:, 1], x[:, -1])
+            return a, b, x
+    converted = m2m.convert(Model(), (torch.arange(24).reshape(4, 6),), backend="fx_importer", capture_trace=True)
+    assert converted.ok and converted.capture_trace["status"] == "complete"
+    source = copy.deepcopy(converted.capture_trace["graphs"]["quantized"])
+    prepared = copy.deepcopy(converted.capture_trace["graphs"]["prepared"])
+    hop = next(node for node in prepared["nodes"] if node.get("functionalization"))
+    if damage == "geometry":
+        view = next(node for node in source["nodes"] if node["target"] == "aten.select.int")
+        view["storage_geometry"][0]["offset"] += 1
+    elif damage == "base":
+        hop["kwargs"]["_left_base_index"] = 1
+    elif damage == "offset":
+        hop["kwargs"]["_left_storage_offset"] = 2
+    elif damage == "schema":
+        hop["functionalization"]["schema"] = str(torch.ops.aten.add_.Tensor._schema)
+    else:
+        source["nodes"][0].pop("storage_geometry")
+    assert graph_relation(source, prepared)["status"] == "diagnostic"
+
+
+def test_coordinate_accounting_checks_actual_arithmetic_not_symbolic_tags():
+    from m2m.capture.trace import graph_relation
+
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            a, b = pair(x[::2], x[1::2])
+            return a, b, x
+    exported = torch.export.export(Model(), (torch.arange(12),), dynamic_shapes=({0: torch.export.Dim("n", min=4, max=31)},))
+    converted = m2m.convert(exported, (torch.arange(12),), backend="fx_importer", capture_trace=True)
+    assert converted.ok and converted.capture_trace["status"] == "complete"
+    source = converted.capture_trace["graphs"]["quantized"]
+    prepared = copy.deepcopy(converted.capture_trace["graphs"]["prepared"])
+    addition = next(node for node in prepared["nodes"] if node["target"] == "<built-in function add>" and 1 in node["args"])
+    addition["args"] = [2 if value == 1 else value for value in addition["args"]]
+    assert graph_relation(source, prepared)["status"] == "diagnostic"
+
+
+def test_non_dense_mutable_base_requires_an_explicit_storage_layout_contract():
+    class Model(torch.nn.Module):
+        def forward(self, x):
+            return pair(x[:, 1], x[:, -1])
+    converted = m2m.convert(Model(), (torch.arange(24).reshape(4, 6).T,), backend="fx_importer")
     assert not converted.ok
-    assert any("view/clone fields need explicit source semantics" in item for item in converted.diagnostics)
+    assert any("proved dense source layout" in diagnostic for diagnostic in converted.diagnostics)
 
 
 def test_dynamic_public_state_keeps_actual_dynamic_tensor_types():
