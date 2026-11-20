@@ -118,6 +118,60 @@ def relations(source, destination, existing, consumed, unknown):
             raise ValueError("source reference changes its actual result")
         return node
 
+    def shape_ancestors(root):
+        """Follow exact shape-preserving source operations, never storage aliases.
+
+        A clone owns fresh storage but preserves dimensions. Torch may hoist a
+        regenerated view's dimension query before that clone and a permutation.
+        Check the actual selected schemas, axis maps and typed source geometry;
+        equal symbolic spellings on unrelated tensors supply no ancestry.
+        """
+        node, visited = aliases.nodes[root], set()
+        while node["id"] not in visited:
+            visited.add(node["id"])
+            yield node
+            args, kwargs = node.get("args", ()), node.get("kwargs", {})
+            schema = aliases.schema(node)
+            if (schema is None or len(schema.returns) != 1 or not args
+                    or any(arg.alias_info is not None and arg.alias_info.is_write for arg in schema.arguments)):
+                return
+            parent = aliases.tensor_ref(args[0])
+            if (parent is None or parent.get("graph_id") != node.get("graph_id")
+                    or parent["ordinal"] >= node["ordinal"]):
+                return
+            before, after = parent.get("storage_geometry", ()), node.get("storage_geometry", ())
+            if len(before) != 1 or len(after) != 1:
+                return
+            shape = before[0].get("shape_expressions")
+            if not isinstance(shape, list):
+                return
+            rank, op = len(shape), node["target"]
+            axes = list(range(rank))
+            if op in {"aten.clone.default", "aten.alias.default", "aten.detach.default"}:
+                if len(args) != 1 or set(kwargs) - ({"memory_format"} if op == "aten.clone.default" else set()):
+                    return
+            elif op == "aten.numpy_T.default" and len(args) == 1 and not kwargs:
+                axes.reverse()
+            elif op == "aten.permute.default" and len(args) == 2 and not kwargs:
+                axes = args[1]
+                if (not isinstance(axes, list) or len(axes) != rank
+                        or any(type(axis) is not int or not -rank <= axis < rank for axis in axes)):
+                    return
+                axes = [axis % rank for axis in axes]
+                if sorted(axes) != list(range(rank)):
+                    return
+            elif op == "aten.transpose.int" and len(args) == 3 and not kwargs:
+                if any(type(axis) is not int or not -rank <= axis < rank for axis in args[1:]):
+                    return
+                left, right = (axis % rank for axis in args[1:])
+                axes[left], axes[right] = axes[right], axes[left]
+            else:
+                return
+            if (after[0].get("shape_expressions") != [shape[axis] for axis in axes]
+                    or after[0].get("dtype") != before[0].get("dtype")):
+                return
+            node = parent
+
     for original in source["nodes"]:
         schema = aliases.schema(original)
         if schema is None:
@@ -192,14 +246,20 @@ def relations(source, destination, existing, consumed, unknown):
                     raise ValueError("unknown storage coordinate computation")
                 args, op = node.get("args", ()), node["target"]
                 members.add(node["id"])
-                if op == "aten.sym_size.int" and len(args) == 2 and type(args[1]) is int:
+                if op in {"aten.sym_size.int", "aten.sym_stride.int"} and len(args) == 2 and type(args[1]) is int:
                     owner = reference(args[0], dst)
-                    if not any(base_identity(args[0], root) for root in roots):
+                    anchored = any(base_identity(args[0], root) for root in roots)
+                    if not anchored:
+                        anchored = any(owner["id"] in mapped.get(ancestor["id"], ())
+                            and owner.get("storage_geometry") == ancestor.get("storage_geometry")
+                            for root in roots for ancestor in shape_ancestors(root))
+                    if not anchored:
                         raise ValueError("coordinate dimension has a different actual owner")
                     geometry = owner.get("storage_geometry", ())
-                    if len(geometry) != 1 or not 0 <= args[1] < len(geometry[0]["shape_expressions"]):
+                    field = "shape_expressions" if op == "aten.sym_size.int" else "stride_expressions"
+                    if len(geometry) != 1 or not -len(geometry[0][field]) <= args[1] < len(geometry[0][field]):
                         raise ValueError("coordinate dimension has no original typed axis")
-                    actual = decode(geometry[0]["shape_expressions"][args[1]])
+                    actual = decode(geometry[0][field][args[1]])
                 elif op in {"<built-in function add>", "<built-in function sub>", "<built-in function mul>",
                             "<built-in function floordiv>"} and len(args) == 2:
                     left, right = (scalar(arg, visiting | {node["id"]}) for arg in args)

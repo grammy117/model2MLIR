@@ -589,9 +589,14 @@ class FXImporter:
                 fx_node=node.name, level="error", message=f"Kernel lowering failed: {err}"))
             return
         calls = [operation for operation in result.ops if isinstance(operation, CallOp)]
-        if len(calls) != 1 or calls[0] is not result.ops[-1]:
-            raise ValueError("registered kernel lowering must end in one complete call")
+        if len(calls) != 1:
+            raise ValueError("registered kernel lowering requires one complete call")
         call = calls[0]
+        if call is not result.ops[-1]:
+            if not functionalized:
+                raise ValueError("registered kernel result adapters require an explicit source contract")
+            from .storage_layouts import checked_result_adapters
+            checked_result_adapters(call, result.ops, result.results)
         meta = dict(node.meta)
         meta["_aten_target"] = _canonicalize_fx_target_str(str(node.target))  # source torch op
         for operation in result.ops:
@@ -795,6 +800,14 @@ class FXImporter:
             item = emit_integer_item(node, value_map, block, _forward_fx_meta)
             if item is not None:
                 value_map[node.name] = item
+                self.decomposed_count += 1
+                continue
+            from .runtime_symbolic_scalars import emit_dense_stride
+            stride = emit_dense_stride(node, value_map, block, _forward_fx_meta)
+            if stride is not None:
+                value_map[node.name] = stride
+                from .shape_domains import emit_symbolic_size
+                emit_symbolic_size(node, shape_context, block, _forward_fx_meta, extent=stride)
                 self.decomposed_count += 1
                 continue
             # Exported data-dependent dimensions carry runtime constraints. Do

@@ -167,6 +167,39 @@ symbolic tag cannot establish correspondence. Unavailable subclass storage stays
 unobserved; these records supply no custom-writer/numeric equivalence or memory
 permission. Original parent snapshots and complete final SSA remain mandatory.
 
+### Dense storage permutations
+
+Zero-origin roots whose exact strides prove a dense axis permutation now retain
+their source storage order through explicit standard `linalg.transpose` operations.
+For example, `state = x.T.clone()` followed by mutable column views is distinct
+from a row-major logical clone: Torch's `auto_functionalized_v2` uses
+`clone_preserve_strides`. Rank-three permuted roots may likewise carry matrix
+views whose coordinates include actual `sym_stride` reads.
+
+The importer reuses `ir/permutations.py` to normalize the complete root before
+the existing storage-profile call and invert that permutation on its updated
+base result. Ordinary returns retain their original positions. All shared views
+still address one complete root, and pre-call snapshots remain separate values.
+The call ABI, `m2m.functional-kernel-storage.v1` and explicit public state ports
+are unchanged. `prov.storage_normalization = "dense-permutation-v1"` records
+intent on the actual transpose; it supplies no missing value or alias semantics.
+
+`sym_stride` lowers only when the source layout proves its exact dense order.
+Standard dimension reads and checked products compute the logical stride, with
+representability checks before index transport. No sample hint or physical
+backend stride supplies the value. Capture correspondence additionally checks
+the actual selected clone/permutation chain when Torch hoists dimension reads
+before the cloned storage root. Changed owners, axis maps, arithmetic or schemas
+remain unaccounted. Post-call adapters must be complete inverse permutations of
+the corresponding incoming roots; unrelated payload/results cannot be hidden.
+
+The proof uses `statically_known_true` rather than guards on backed examples and
+does not use Torch's broader density shortcuts for arbitrary empty/unit strides.
+Padded, overlapping, nonzero-origin or unproved storage still needs an explicit
+storage representation. These operations supply no physical alias or automatic
+caller copyback. Complete consumer qualification is recorded separately in
+triton2MLIR's `docs/storage_permutations.md`.
+
 ## Limitations
 
 | gap | today | what it needs |

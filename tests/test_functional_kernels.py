@@ -233,13 +233,18 @@ def test_coordinate_accounting_checks_actual_arithmetic_not_symbolic_tags():
     assert graph_relation(source, prepared)["status"] == "diagnostic"
 
 
-def test_non_dense_mutable_base_requires_an_explicit_storage_layout_contract():
+@pytest.mark.parametrize("layout", ("holes", "overlap", "offset"))
+def test_hidden_or_overlapping_mutable_base_requires_an_explicit_storage_contract(layout):
     class Model(torch.nn.Module):
         def forward(self, x):
             return pair(x[:, 1], x[:, -1])
-    converted = m2m.convert(Model(), (torch.arange(24).reshape(4, 6).T,), backend="fx_importer")
+    source = (torch.arange(48).reshape(4, 12)[:, ::2] if layout == "holes" else
+              torch.arange(6).expand(4, 6) if layout == "overlap" else
+              torch.arange(25)[1:].reshape(4, 6))
+    converted = m2m.convert(Model(), (source,), backend="fx_importer")
     assert not converted.ok
-    assert any("proved dense source layout" in diagnostic for diagnostic in converted.diagnostics)
+    assert any("proved dense source layout" in diagnostic or "proved zero origin" in diagnostic
+               for diagnostic in converted.diagnostics)
 
 
 def test_dynamic_public_state_keeps_actual_dynamic_tensor_types():

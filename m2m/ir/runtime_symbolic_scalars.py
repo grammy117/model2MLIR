@@ -38,3 +38,47 @@ def emit_integer_item(node, value_map, block, stamp):
         stamp(operation, node.meta, "runtime_integer")
         block.add_op(operation)
     return result
+
+
+def emit_dense_stride(node, value_map, block, stamp):
+    """Read a proved source dense-layout stride as checked dimension products.
+
+    Tensor values have no physical stride query. This represents the captured
+    source's logical storage coordinates; consumers still need an explicit
+    storage/view binding before interpreting those coordinates as addresses.
+    """
+    from xdsl.dialects import cf
+
+    from .shape_domains import SIZE_MAX, Builder
+    from .standard_arith import IndexCastUIOp
+    from .storage_layouts import dense_axes
+
+    if node.target != torch.ops.aten.sym_stride.int or len(node.args) != 2 or node.kwargs:
+        return None
+    original, axis = node.args
+    source = value_map.get(getattr(original, "name", ""))
+    if (source is None or not isinstance(source.type, builtin.TensorType)
+            or not isinstance(source.type.encoding, builtin.NoneAttr)):
+        return None
+    shape = source.type.get_shape()
+    if type(axis) is not int or not -len(shape) <= axis < len(shape):
+        return None
+    axes = dense_axes(original.meta.get("val"), len(shape))
+    axis %= len(shape)
+    temporary = type(block)()
+    builder = Builder(temporary, stamp)
+    builder.metadata = node.meta
+    stride = builder.constant(1)
+    for minor in axes[axes.index(axis) + 1:]:
+        size = builder.extent(source, minor) if shape[minor] < 0 else builder.constant(shape[minor])
+        stride = builder.binary("mul", stride, size)
+    if stride.upper > SIZE_MAX:
+        builder.check(stride, builder.constant(SIZE_MAX), "sle", "source dense stride fits logical i64")
+    result = builder.emit(IndexCastUIOp(stride.value, builtin.IndexType()))
+    restored = builder.emit(IndexCastUIOp(result, stride.value.type))
+    equal = builder.emit(arith.CmpiOp(restored, stride.value, "eq"))
+    builder.emit(cf.AssertOp(equal, "source dense stride fits logical index storage"))
+    for operation in tuple(temporary.ops):
+        temporary.detach_op(operation)
+        block.add_op(operation)
+    return result

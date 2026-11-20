@@ -56,18 +56,20 @@ class Geometry(Builder):
         return builtin.StringAttr(name)
 
     def dense(self, node, index):
-        from torch.fx.experimental.symbolic_shapes import statically_known_true, sym_eq
+        from .permutations import lower
+        from .storage_layouts import dense_axes
 
         source, metadata = self.values[node.name], node.meta.get("val")
-        if metadata is None or len(source.type.get_shape()) > 8:
-            raise KernelLoweringError("mutable storage requires bounded original tensor metadata")
-        product = 1
-        if not statically_known_true(sym_eq(metadata.storage_offset(), 0)):
-            raise KernelLoweringError("mutable storage base must have a proved zero origin")
-        for size, stride in reversed(list(zip(metadata.shape, metadata.stride(), strict=True))):
-            if not statically_known_true(sym_eq(stride, product)):
-                raise KernelLoweringError("mutable storage base needs its proved dense source layout")
-            product *= size
+        shape = source.type.get_shape()
+        axes = dense_axes(metadata, len(shape))
+        if axes != tuple(range(len(shape))):
+            lowered = lower(source, axes, [shape[axis] for axis in axes])
+            if lowered is None:
+                raise KernelLoweringError("mutable storage permutation requires complete standard tensor types")
+            operations, source = lowered
+            for op in operations:
+                self.emit(op)
+            source.owner.attributes["prov.storage_normalization"] = builtin.StringAttr("dense-permutation-v1")
         dimensions = [self.extent(source, axis) if size < 0 else self.constant(size)
                       for axis, size in enumerate(source.type.get_shape())]
         strides, stride = [], self.constant(1)
@@ -75,7 +77,8 @@ class Geometry(Builder):
             strides.insert(0, stride)
             stride = self.binary("mul", stride, size)
         names = [self.field(f"@base{index}.size{axis}", size) for axis, size in enumerate(dimensions)]
-        return dimensions, strides, names
+        inverse = [axes.index(axis) for axis in range(len(axes))]
+        return [dimensions[axis] for axis in inverse], [strides[axis] for axis in inverse], names, source, axes
 
     def view(self, kwargs, argument, base, dimensions, strides, index):
         prefix = "_" + argument
@@ -119,7 +122,7 @@ def emit(spec, node, value_map, bases, mutated, ordinary, types):
         if type(base) is not int or not 0 <= base < len(bases):
             raise KernelLoweringError("mutable storage argument lacks an original base index")
         grouped[base].append(arg.name)
-        dimensions, strides, _names = layouts[base]
+        dimensions, strides, _names, _source, _axes = layouts[base]
         views.append(geometry.view(kwargs, arg.name, base, dimensions, strides, index))
     if any(not group for group in grouped):
         raise KernelLoweringError("mutable storage has an unaccounted cloned base")
@@ -128,6 +131,9 @@ def emit(spec, node, value_map, bases, mutated, ordinary, types):
     if set(kwargs) - {arg.name for arg in schema.arguments if arg.name not in omitted}:
         raise KernelLoweringError("mutable storage has unknown, overridden or incomplete source fields")
     slots, result_types = [], []
+    types = list(types)
+    for index in range(len(bases)):
+        types[ordinary + index] = layouts[index][3].type
     for typ in types:
         slots.append(len(result_types) if typ is not None else -1)
         if typ is not None:
@@ -141,7 +147,7 @@ def emit(spec, node, value_map, bases, mutated, ordinary, types):
         ties.append(builtin.DictionaryAttr({"base_index": builtin.IntegerAttr(index, builtin.i64),
             "operand": builtin.IntegerAttr(len(operands), builtin.i64), "result": builtin.IntegerAttr(slots[ordinary+index], builtin.i64)}))
         roots.append(builtin.DictionaryAttr({"operand": name, "shape": builtin.ArrayAttr(layouts[index][2])}))
-        operands.append(value_map[base.name])
+        operands.append(layouts[index][3])
         names.append(name)
     operands.extend(value for _name, value in geometry.fields)
     names.extend(builtin.StringAttr(name) for name, _value in geometry.fields)
@@ -154,4 +160,20 @@ def emit(spec, node, value_map, bases, mutated, ordinary, types):
         "prov.kernel_result_slots": builtin.ArrayAttr(builtin.IntegerAttr(index, builtin.i64) for index in slots),
         "prov.kernel_storage_bases": builtin.ArrayAttr(roots), "prov.kernel_storage_views": builtin.ArrayAttr(views)})
     result.ops = [geometry.block.detach_op(op) for op in tuple(geometry.block.ops)] + [call]
+    from .permutations import lower
+    for index, base in enumerate(bases):
+        axes = layouts[index][4]
+        if axes == tuple(range(len(axes))):
+            continue
+        slot = slots[ordinary + index]
+        inverse = [axes.index(axis) for axis in range(len(axes))]
+        lowered = lower(call.results[slot], inverse, value_map[base.name].type.get_shape())
+        if lowered is None:
+            raise KernelLoweringError("mutable storage result cannot restore its original logical tensor type")
+        operations, value = lowered
+        value.owner.attributes["prov.storage_normalization"] = builtin.StringAttr("dense-permutation-v1")
+        result.ops.extend(operations)
+        result.results[slot] = value
+        if result.result is call.results[slot]:
+            result.result = value
     return result, slots
