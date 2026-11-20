@@ -1,5 +1,17 @@
 # Symbolic dimensions at the FX importer boundary
 
+Shape-derived arithmetic can now retain signed scalar controls such as
+`2 - x.shape[0]` as ordinary i64 operands of registered kernel calls. Actual
+dimension reads, entry-domain guards and interval-sized arithmetic remain;
+signed transport checks its round trip instead of converting a negative value
+to a tensor size or an unsigned index. Subsequent add/subtract/multiply and
+positive-divisor floor division retain their signed source computation.
+Arithmetic whose proved interval exceeds signed i64 still refuses scalar
+transport. Nonnegative size arithmetic keeps its existing checked index path;
+this adds no negative tensor extent or physical index-width permission.
+`tests/test_symbolic_dimensions.py` covers signed and mixed-sign controls,
+dependent arithmetic, serialized MLIR and the out-of-range refusal.
+
 Literal `aten.select.int` now supports actual dynamic dimensions and scalar
 results. Negative indices normalize against the selected source extent;
 executable bounds precede index transport and extraction. Static invalid indices

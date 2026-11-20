@@ -159,14 +159,48 @@ def test_exported_symbolic_arithmetic_keeps_actual_scalar_ssa_and_checked_transp
     _parse_mlir_text_to_xdsl(result.mlir_text).verify()
 
 
-def test_negative_symbolic_control_is_not_silently_transported_as_a_size(monkeypatch):
+@pytest.mark.parametrize("kind", ["sub", "mul", "floor", "mixed", "unbounded"])
+def test_negative_symbolic_control_retains_signed_i64_without_becoming_a_size(monkeypatch, kind):
+    from xdsl.dialects import builtin, cf
+    from m2m.capture.torch_mlir_bridge import _parse_mlir_text_to_xdsl
+    from m2m.coverage import opaque_report
+
     class Negative(torch.nn.Module):
         def forward(self, x):
-            return control_kernel(x, 2 - x.shape[0])
+            n = 2 - x.shape[0]
+            if kind == "mul":
+                n = n * 3
+            elif kind == "floor":
+                n = n // 2
+            elif kind == "mixed":
+                n = n + 4
+            return control_kernel(x, n)
 
     monkeypatch.setitem(KERNEL_REGISTRY, "m2m_symbolic_test::control", KernelSpec("m2m_symbolic_test::control"))
     inputs = (torch.arange(13, dtype=torch.int32),)
     program = torch.export.export(Negative(), inputs,
-        dynamic_shapes={"x": {0: torch.export.Dim("n", min=4, max=31)}})
+        dynamic_shapes={"x": {0: torch.export.Dim("n", min=2, **({} if kind == "unbounded" else {"max": 31}))}})
+    result = m2m.convert(program, inputs, backend="fx_importer", capture_trace=True)
+    assert result.ok, result.diagnostics
+    assert opaque_report(result.mlir_text) == {}
+    call = next(op for op in result.module.walk() if isinstance(op, CallOp))
+    assert call.arguments[1].type == builtin.i64
+    assert call.arguments[1].owner.name == {"sub": "arith.subi", "mul": "arith.muli",
+                                          "floor": "arith.floordivsi", "mixed": "arith.addi",
+                                          "unbounded": "arith.trunci"}[kind]
+    assert any(isinstance(op, cf.AssertOp) and op.msg.data == "symbolic signed arithmetic fits logical i64 storage"
+               for op in result.module.walk())
+    _parse_mlir_text_to_xdsl(result.mlir_text).verify()
+
+
+def test_symbolic_control_outside_signed_i64_refuses_without_truncation(monkeypatch):
+    class Wide(torch.nn.Module):
+        def forward(self, x):
+            return control_kernel(x, (2 - x.shape[0]) * (1 << 63))
+
+    monkeypatch.setitem(KERNEL_REGISTRY, "m2m_symbolic_test::control", KernelSpec("m2m_symbolic_test::control"))
+    inputs = (torch.arange(13, dtype=torch.int32),)
+    program = torch.export.export(Wide(), inputs,
+        dynamic_shapes={"x": {0: torch.export.Dim("n", min=2, max=31)}})
     result = m2m.convert(program, inputs, backend="fx_importer", capture_trace=True)
     assert not result.ok

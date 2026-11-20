@@ -212,10 +212,11 @@ def emit_entry_shape_guards(exported, placeholders, block, stamp, *, context=Non
 
 
 def emit_symbolic_size(node, context, block, stamp, *, extent=None):
-    """Keep actual nonnegative symbolic size SSA, with checked index transport.
+    """Keep actual shape-derived scalar SSA, with checked typed transport.
 
     Size queries check the source shape relationship. Arithmetic uses actual
     imported operands; expression metadata never substitutes for that math.
+    Signed controls retain i64 values rather than becoming tensor sizes.
     """
     import operator
 
@@ -247,12 +248,25 @@ def emit_symbolic_size(node, context, block, stamp, *, extent=None):
                 else:
                     operands.append(context["values"][argument.name])
             integer = builder.binary(kinds[node.target], *operands)
-            if not 0 <= integer.lower <= integer.upper <= SIZE_MAX:
+            if not -(1 << 63) <= integer.lower <= integer.upper <= SIZE_MAX:
                 return None
-            result = builder.emit(IndexCastUIOp(integer.value, builtin.IndexType()))
-            back = builder.emit(IndexCastUIOp(result, integer.value.type))
+            if integer.lower < 0:
+                width = integer.value.type.bitwidth
+                if width == 64:
+                    result = integer.value
+                    back = result
+                else:
+                    cast = arith.ExtSIOp if width < 64 else arith.TruncIOp
+                    result = builder.emit(cast(integer.value, builtin.i64))
+                    restore = arith.TruncIOp if width < 64 else arith.ExtSIOp
+                    back = builder.emit(restore(result, integer.value.type))
+                message = "symbolic signed arithmetic fits logical i64 storage"
+            else:
+                result = builder.emit(IndexCastUIOp(integer.value, builtin.IndexType()))
+                back = builder.emit(IndexCastUIOp(result, integer.value.type))
+                message = "symbolic size arithmetic fits logical index storage"
             equal = builder.emit(arith.CmpiOp(integer.value, back, "eq"))
-            builder.emit(cf.AssertOp(equal, "symbolic size arithmetic fits logical index storage"))
+            builder.emit(cf.AssertOp(equal, message))
         context["values"][node.name] = integer
         for operation in list(temporary.ops):
             temporary.detach_op(operation)
