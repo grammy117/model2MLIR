@@ -4,6 +4,14 @@ A model can call a hand-written kernel, such as a `@torch.library.triton_op`, th
 not decompose. model2MLIR captures each call to a **registered** kernel as a typed `func.call` to a
 body-less declaration tagged with the kernel's name. A downstream compiler later supplies the code.
 
+Surrounding `torch.full_like` initialization keeps runtime dimensions as actual
+`tensor.dim` operands of `tensor.splat`. Dynamic result dimensions use the
+standard unknown-dimension marker; no example extent supplies an allocation.
+Explicit output dtype and the existing scalar conversion rules remain intact.
+When a source dimension is dynamic but the result contract fixes it, an actual
+dimension assertion precedes the fill. This supports initialized state carried
+between dependent Triton calls without introducing an opaque initialization.
+
 This page covers the capture side. The other half, which links a body into the model, compiles it for
 rv64gcv and runs it on spike, is merlin's
 [Triton kernel integration guide](https://github.com/ucb-bar/merlin/blob/trition-op-integration/docs/guides/triton_kernel_integration.md)

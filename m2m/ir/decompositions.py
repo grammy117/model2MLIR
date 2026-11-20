@@ -354,14 +354,14 @@ def _elementwise(
     return [*extent_ops, empty, generic], generic.results[0]
 
 
-def _splat_scalar(scalar: Any, result_type: TensorType):
+def _splat_scalar(scalar: Any, result_type: TensorType, *, dynamic_sizes=None):
     """Build a full-shape constant tensor by splatting a scalar (for binary-with-scalar)."""
     from xdsl.dialects.arith import ConstantOp, SIToFPOp
     from xdsl.dialects.builtin import Float32Type, FloatAttr, IntegerAttr, IntegerType, i64
     from xdsl.dialects.tensor import SplatOp
 
     elem = result_type.element_type
-    if any(d < 0 for d in result_type.get_shape()):
+    if sum(d < 0 for d in result_type.get_shape()) != len(dynamic_sizes or ()):
         return None
     if isinstance(elem, IntegerType):
         const = ConstantOp(IntegerAttr(int(scalar), elem), elem)
@@ -387,7 +387,7 @@ def _splat_scalar(scalar: Any, result_type: TensorType):
     else:
         const = ConstantOp(FloatAttr(float(scalar), elem), elem)
         ops, value = [const], const.result
-    splat = SplatOp(value, [], result_type)
+    splat = SplatOp(value, dynamic_sizes or [], result_type)
     return [*ops, splat], splat.results[0]
 
 
@@ -2139,7 +2139,7 @@ def decompose_empty(operands, meta, node_name):
     return DecompResult(ops=[e], result=e.results[0], region_ids=[rid], pattern_hint="empty")
 
 
-def _make_fill(value_idx: int):
+def _make_fill(value_idx: int, *, like: bool = False):
     """aten.{scalar_tensor,full,full_like} -> tensor.splat(const) (family: fill)."""
 
     def f(operands, meta, node_name):
@@ -2148,12 +2148,38 @@ def _make_fill(value_idx: int):
             val = val[0]
         elem = _element_type_from_meta(meta)
         out_shape = _static_shape(getattr(val, "shape", []))
-        if any(d < 0 for d in out_shape):
+        shape_ops, dynamic_sizes = [], []
+        if like and operands and isinstance(operands[0].type, TensorType):
+            from xdsl.dialects import arith, builtin, cf, tensor
+
+            source_shape = operands[0].type.get_shape()
+            if len(source_shape) != len(out_shape) or any(
+                a >= 0 and b >= 0 and a != b for a, b in zip(source_shape, out_shape, strict=True)
+            ):
+                return _opaque_decomp("aten_fill", operands[:1], meta, "fill", pattern_hint="fill")
+            for axis, (source_size, output_size) in enumerate(zip(source_shape, out_shape, strict=True)):
+                if source_size >= 0 and output_size >= 0:
+                    continue
+                index = arith.ConstantOp.from_int_and_width(axis, builtin.IndexType())
+                dimension = tensor.DimOp(operands[0], index.result)
+                shape_ops.extend((index, dimension))
+                if output_size < 0:
+                    dynamic_sizes.append(dimension.result)
+                else:
+                    declared = arith.ConstantOp.from_int_and_width(output_size, builtin.IndexType())
+                    equal = arith.CmpiOp(dimension.result, declared.result, "eq")
+                    check = cf.AssertOp(equal.result, "full_like: source dimension differs from result type")
+                    shape_ops.extend((declared, equal, check))
+        if any(d < 0 for d in out_shape) and not dynamic_sizes:
             return _opaque_decomp("aten_fill", [], meta, "fill", pattern_hint="fill")
-        sp = _splat_scalar(_fx_arg(meta, value_idx, 0.0), TensorType(elem, out_shape))
+        from xdsl.dialects.builtin import DYNAMIC_INDEX
+
+        result_type = TensorType(elem, [size if size >= 0 else DYNAMIC_INDEX for size in out_shape])
+        sp = _splat_scalar(_fx_arg(meta, value_idx, 0.0), result_type, dynamic_sizes=dynamic_sizes)
         if sp is None:
             return _opaque_decomp("aten_fill", [], meta, "fill", pattern_hint="fill")
-        ops, res = sp
+        fill_ops, res = sp
+        ops = [*shape_ops, *fill_ops]
         rid = _next_region_id("fill")
         for op in ops:
             _attach_region_id(op, rid)
@@ -7344,7 +7370,7 @@ DECOMPOSITION_TABLE.update(
         "aten.new_empty.default": decompose_empty,
         "aten.scalar_tensor.default": _make_fill(0),
         "aten.full.default": _make_fill(1),
-        "aten.full_like.default": _make_fill(1),
+        "aten.full_like.default": _make_fill(1, like=True),
         # copy / pow / minmax extras
         "aten.copy.default": decompose_copy,
         "aten.pow.Tensor_Tensor": decompose_pow_tensor_tensor,
