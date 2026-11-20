@@ -166,7 +166,7 @@ under its separate compiler/runtime contracts.
 ## Dynamic positive-step slices
 
 `dynamic_slices` emits rank-preserving `tensor.extract_slice` from actual source
-dimensions and literal integer start/end/positive-step arguments. It normalizes
+dimensions, literal or scalar-SSA start/end bounds and literal positive steps. It normalizes
 negative bounds, clips both endpoints into the actual extent and computes the
 nonnegative length. The existing checked shape builder retains unsigned index
 round trips and logical signed-i64 size bounds without fixing native index
@@ -179,7 +179,23 @@ overflow or a wide-division runtime dependency. Static result sizes require an
 executable equality check unless the source itself fixes the size, as for
 `x[:0]`. Other dynamic axes retain their real source dimensions. Type-preserving
 casts retain dynamic metadata when the actual slice has a more precise size.
-Unknown/nonliteral bounds, nonpositive steps and unsupported rank changes keep
+The importer resolves each nonliteral bound through its actual `_fx_ssa_args`
+position. This also applies to static parameter tensors, for example
+`weight[:x.shape[0]]` and `weight[x.shape[0]:]`; a static source type does not
+make its slice bounds static. Original exported dimensions and entry guards
+remain executable. No extra symbolic specialization guard is introduced.
+Dimension-derived index bounds retain unsigned transport, round-trip and
+logical signed-i64-size checks. Integer bounds retain signed storage semantics;
+normalization uses sufficiently wide arithmetic before clipping, including at
+both signed-i64 extremes. The nonempty condition compares actual result sizes
+against zero without choosing a signed native-index interpretation.
+
+The source clipping behavior was checked against PyTorch 2.10.0's
+[`at::native::slice`](https://github.com/pytorch/pytorch/blob/449b1768410104d3ed79d3bcfe4ba1d65c7f22c0/aten/src/ATen/native/TensorShape.cpp#L2896).
+The implementation reuses the existing checked shape builder and empty-slice
+control flow; it does not copy PyTorch's physical-view construction.
+
+Unresolved/noninteger bounds, nonpositive or runtime steps and unsupported rank changes keep
 their explicit opaque/refusal boundary. Rejected static contracts publish no
 new operand uses. No physical view-alias or ownership promise is introduced.
 
@@ -190,6 +206,12 @@ check incompatible-broadcast aborts and include signed-i64 extreme bounds/steps.
 Those primitive tests use explicit test-driver output extents for descriptor
 allocation; they do not establish a general derived-result compiler signature.
 The enclosing-model tests independently derive their actual Merlin signatures.
+`tests/test_runtime_slice_bounds.py` additionally checks actual exported
+parameter-prefix/suffix slices, preserved scalar SSA, typed serialization and
+refused unresolved bounds. Triton2MLIR's runtime-bound execution selection
+checks signed extremes, empty/clipped slices and large steps on both static and
+dynamic inputs; its complete rectangular model retains both parameter slices
+and both original Triton loop nests through host and serial-target execution.
 
 ## Symbolic size arithmetic at kernel calls
 

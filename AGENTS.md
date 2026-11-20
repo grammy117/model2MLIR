@@ -135,6 +135,10 @@ func.func private @triton_exp__fused_mlp2(...) -> tensor<4x32xf32> attributes {p
   tensor reads; two dynamic type markers do not prove equality. Positive-step
   slices reuse checked interval-sized shape arithmetic, clip actual dimensions
   and narrow only proved logical-i64 lengths before quotient/remainder.
+  Start/end bounds may be actual scalar SSA on static or dynamic tensors;
+  resolve their exact FX argument positions rather than using symbolic hints.
+  Signed bounds normalize before clipping; dimension-derived index values keep
+  unsigned round-trip and logical-i64-size checks. Steps remain positive literals.
   Keep numeric opmath, source-domain guards and unknown-bound refusals intact.
   Empty runtime slices return an exactly shaped empty tensor through standard
   control flow. Do not execute an extraction with a clipped boundary offset;

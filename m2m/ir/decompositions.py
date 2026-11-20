@@ -6076,12 +6076,22 @@ def decompose_slice_tensor(operands, meta, node_name):
     val: Any = meta["val"]
     out_shape = _static_shape(getattr(val, "shape", []))
     elem = _t_elem(src)
-    if any(d < 0 for d in in_shape) or any(d < 0 for d in out_shape):
+    arguments = [_fx_arg(meta, i, default) for i, default in ((1, 0), (2, None), (3, None), (4, 1))]
+    scalar_arguments = meta.get("_fx_ssa_args") or {}
+    dynamic_bounds = False
+    for position in (2, 3):
+        raw = arguments[position - 1]
+        if raw is not None and type(raw) is not int:
+            value = scalar_arguments.get(position)
+            if value is None:
+                return _opaque_decomp("aten_slice", operands[:1], meta, "layout", pattern_hint="slice")
+            arguments[position - 1] = value
+            dynamic_bounds = True
+    if dynamic_bounds or any(d < 0 for d in in_shape) or any(d < 0 for d in out_shape):
         from .dynamic_slices import extract_slice
 
         result_type = TensorType(elem, [_coerce_static_dim(d) for d in val.shape])
-        result = extract_slice(src, result_type, [_fx_arg(meta, i, default)
-            for i, default in ((1, 0), (2, None), (3, None), (4, 1))])
+        result = extract_slice(src, result_type, arguments)
         if result is None:
             return _opaque_decomp("aten_slice", operands[:1], meta, "layout", pattern_hint="slice")
         ops, value = result

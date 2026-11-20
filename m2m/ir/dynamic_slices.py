@@ -1,11 +1,11 @@
 """Rank-preserving positive-step slices with executable runtime clipping.
 
-Reuse checked, interval-sized shape arithmetic. Bounds come from actual tensor
-dimensions and source integer literals; symbolic example hints never participate.
+Reuse checked, interval-sized shape arithmetic. Bounds come from actual scalar
+SSA or source integer literals; symbolic example hints never participate.
 """
 
-from xdsl.dialects import arith, builtin, scf, tensor
-from xdsl.ir import Block, Region
+from xdsl.dialects import arith, builtin, cf, scf, tensor
+from xdsl.ir import Block, Region, SSAValue
 
 from .shape_domains import SIZE_MAX, Builder, Integer
 from .standard_arith import IndexCastUIOp
@@ -18,7 +18,8 @@ def extract_slice(source, result_type, arguments):
     declared = tuple(result_type.get_shape())
     if (type(axis) is not int or not -len(shape) <= axis < len(shape)
             or len(shape) != len(declared) or type(step) is not int or not 0 < step <= SIZE_MAX
-            or any(value is not None and (type(value) is not int or not -SIZE_MAX-1 <= value <= SIZE_MAX)
+            or any(value is not None and not (type(value) is int and -SIZE_MAX-1 <= value <= SIZE_MAX
+                or isinstance(value, SSAValue) and isinstance(value.type, (builtin.IntegerType, builtin.IndexType)))
                    for value in (start, end))):
         return None
     axis %= len(shape)
@@ -26,7 +27,8 @@ def extract_slice(source, result_type, arguments):
     for dimension, (actual, wanted) in enumerate(zip(shape, declared, strict=True)):
         if dimension != axis and wanted >= 0 and actual != wanted:
             return None
-    if shape[axis] >= 0:
+    literal_bounds = all(value is None or type(value) is int for value in (start, end))
+    if shape[axis] >= 0 and literal_bounds:
         begin, finish, stride = slice(start, end, step).indices(shape[axis])
         if declared[axis] >= 0 and declared[axis] != len(range(begin, finish, stride)):
             return None
@@ -43,14 +45,41 @@ def extract_slice(source, result_type, arguments):
         condition = builder.emit(arith.CmpiOp(left, right, predicate))
         return Integer(builder.emit(arith.SelectOp(condition, left, right)), lower, upper)
 
+    def integer(bound):
+        if type(bound) is int:
+            return builder.constant(bound)
+        if isinstance(bound.type, builtin.IndexType):
+            unsigned = isinstance(bound.owner, (tensor.DimOp, IndexCastUIOp))
+            cast = IndexCastUIOp if unsigned else arith.IndexCastOp
+            value = builder.emit(cast(bound, builtin.i64))
+            restored = builder.emit(cast(value, builtin.IndexType()))
+            equal = builder.emit(arith.CmpiOp(bound, restored, "eq"))
+            builder.emit(cf.AssertOp(equal, "slice bound fits logical i64 storage"))
+            if unsigned:
+                result = Integer(value, 0, SIZE_MAX)
+                limit = builder.emit(arith.ConstantOp.from_int_and_width(SIZE_MAX, builtin.i64))
+                valid = builder.emit(arith.CmpiOp(value, limit, "ule"))
+                builder.emit(cf.AssertOp(valid, "slice shape bound is a nonnegative signed i64 size"))
+                return result
+            return Integer(value, -SIZE_MAX-1, SIZE_MAX)
+        width = bound.type.bitwidth
+        if not 1 <= width < 4096:
+            raise ValueError("slice bound exceeds checked integer arithmetic")
+        return Integer(bound, -(1 << (width - 1)), (1 << (width - 1)) - 1)
+
     def clipped(bound, extent):
         if bound is None:
             return extent
-        literal = builder.constant(bound)
-        if bound >= 0:
-            return select(literal, extent, "sle", 0, min(bound, SIZE_MAX))
-        shifted = builder.binary("add", extent, literal)
-        return select(shifted, builder.constant(0), "sge", 0, max(0, SIZE_MAX + bound))
+        value = integer(bound)
+        if value.lower >= 0:
+            return select(value, extent, "sle", 0, min(value.upper, extent.upper))
+        shifted = builder.binary("add", extent, value)
+        negative = select(shifted, builder.constant(0), "sge", max(0, shifted.lower), max(0, shifted.upper))
+        if value.upper < 0:
+            return Integer(negative.value, 0, max(0, extent.upper + value.upper))
+        positive = select(value, extent, "sle", min(value.lower, extent.lower), min(value.upper, extent.upper))
+        test = builder.emit(arith.CmpiOp(*builder.align(value, builder.constant(0)), "slt"))
+        return Integer(builder.emit(arith.SelectOp(test, *builder.align(negative, positive))), 0, extent.upper)
 
     for dimension, size in enumerate(shape):
         if dimension != axis:
@@ -58,7 +87,7 @@ def extract_slice(source, result_type, arguments):
                 index = builder.emit(arith.ConstantOp.from_int_and_width(dimension, builtin.IndexType()))
                 sizes.append(builder.emit(tensor.DimOp(source, index)))
             continue
-        if size >= 0:
+        if size >= 0 and literal_bounds:
             begin, finish, stride = slice(start, end, step).indices(size)
             count = len(range(begin, finish, stride))
             static_offsets[dimension], static_sizes[dimension] = begin, count
@@ -66,7 +95,7 @@ def extract_slice(source, result_type, arguments):
         if start == 0 and end == 0:
             static_sizes[dimension] = 0
             continue
-        extent = builder.extent(source, dimension)
+        extent = builder.constant(size) if size >= 0 else builder.extent(source, dimension)
         begin, finish = clipped(start, extent), clipped(end, extent)
         length = builder.binary("sub", finish, begin)
         length = select(length, builder.constant(0), "sge", 0, SIZE_MAX)
@@ -134,7 +163,7 @@ def finish_extraction(operation, block, result_type):
         for size in result_shape:
             extent = (next(dynamic_sizes) if size == builtin.DYNAMIC_INDEX else
                       builder.emit(arith.ConstantOp.from_int_and_width(size, builtin.IndexType())))
-            positive = builder.emit(arith.CmpiOp(extent, zero, "sgt"))
+            positive = builder.emit(arith.CmpiOp(extent, zero, "ne"))
             predicate = builder.emit(arith.AndIOp(predicate, positive))
         empty = tensor.EmptyOp(sizes, operation.result.type)
         operation = scf.IfOp(predicate, [operation.result.type],
